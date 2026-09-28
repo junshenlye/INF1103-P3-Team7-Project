@@ -152,7 +152,7 @@ def build_timeline(ai_result, trimester_context):
                 f"{reference}: {item}"
                 for item in assessment.get("comments", [])[:1]
             )
-            feedback = _assessment_feedback(assessment, weightage, weeks)
+            error_status, feedback = _assessment_feedback(assessment, weightage, weeks)
             if feedback:
                 checklist.append(f"{reference}: {feedback}")
             if not weeks:
@@ -194,6 +194,8 @@ def build_timeline(ai_result, trimester_context):
                 "weightage_scope": weightage_scope,
                 "credit_units": credits,
                 "academic_importance": importance,
+                "error_status": error_status, #Added field
+                "issues": list(assessment.get("missing_information", [])) if feedback else [], #Added field
                 "due_date": assessment.get("due_date"),
                 "due_week": assessment.get("due_week"),
                 "occurrence_weeks": weeks,
@@ -459,16 +461,18 @@ def _timing_label(weeks, due_week):
 def _assessment_feedback(assessment, weightage, weeks):
     """Return one compact, material feedback item for an assessment."""
     model_missing = assessment.get("missing_information", [])
+    #Check if there are missing critical information of the modules
     if model_missing and (weightage is None or not weeks):
-        return "Assessment details are incomplete."
+        return "INVALID", "Assessment details are incomplete."
     if weightage is None:
-        return "Assessment weightage is missing."
+        return "INVALID", "Assessment weightage is missing."
     if not weeks:
-        return "Assessment timing is missing."
+        return "INVALID", "Assessment timing is missing."
     if model_missing:
         return str(model_missing[0]).strip() or "Assessment details are incomplete."
-    return None
-
+    #If all the information is complete, return valid
+    else:
+        return "VALID", None
 
 def _limit_feedback(items, limit=MAX_FINAL_FEEDBACK_ITEMS):
     unique = _unique(items)
