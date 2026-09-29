@@ -80,8 +80,8 @@ or a second AI implementation to keep in sync.
 
 The calendar has one source of truth in `src/logic_manager.py`. The current
 configuration is SIT AY2026/27 Trimester 1 (31 August–6 December 2026), including
-recess in Week 7 and final assessment in Week 14. Its generated data is injected
-into the AI prompt; the dates are not duplicated in prompt text.
+recess in Week 7 and final assessment in Week 14. The AI extracts source facts;
+the Logic Manager then maps extracted dates onto this calendar.
 
 ## Run
 

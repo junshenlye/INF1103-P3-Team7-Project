@@ -42,26 +42,46 @@ def save_uploaded_images(uploaded_files, target_directory):
 
 def _frontend_modules(form, files, target_directory):
     """Turn compact indexed multipart fields into the core request shape."""
+    raw_module_count = form.get("module_count", "1")
     try:
-        module_count = int(form.get("module_count", "1"))
+        module_count = int(raw_module_count)
     except ValueError:
         module_count = 0
+
+    limited_module_count = min(module_count, 21)
+    safe_module_count = max(0, limited_module_count)
     modules = []
-    # Keep one extra item so the IO manager can return its explicit 20-module error.
-    for index in range(max(0, min(module_count, 21))):
-        modules.append(
-            {
-                "module_name": form.get(f"module_name_{index}", ""),
-                "credit_units": form.get(f"credit_units_{index}", ""),
-                "additional_context": form.get(f"additional_context_{index}", ""),
-                "files": save_uploaded_files(
-                    files.getlist(f"source_files_{index}"),
-                    target_directory,
-                    name_prefix=f"module-{index}-",
-                ),
-            }
+    for index in range(safe_module_count):
+        raw_credit_units = form.get(f"credit_units_{index}", "")
+        credit_units = None
+        if raw_credit_units:
+            try:
+                credit_units = float(raw_credit_units)
+            except ValueError:
+                credit_units = raw_credit_units
+
+        module_name = form.get(f"module_name_{index}", "")
+        additional_context = form.get(f"additional_context_{index}", "")
+        uploaded_files = files.getlist(f"source_files_{index}")
+        image_paths = save_uploaded_files(
+            uploaded_files,
+            target_directory,
+            name_prefix=f"module-{index}-",
         )
-    return {"modules": modules}
+
+        module = {
+            "module_name": module_name,
+            "credit_units": credit_units,
+            "additional_context": additional_context,
+            "files": image_paths,
+        }
+        modules.append(module)
+
+    actual_module_count = len(modules)
+    return {
+        "module_count": actual_module_count,
+        "modules": modules,
+    }
 
 
 def create_app():

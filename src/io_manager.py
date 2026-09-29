@@ -1,174 +1,143 @@
-"""Validate and normalize frontend evidence before it reaches the model."""
-
-from pathlib import Path
+"""Validate frontend data before it is passed to the AI manager."""
 
 
-SUPPORTED_IMAGES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-SUPPORTED_DOCUMENTS = {".pdf", ".txt", ".md", ".csv", ".json", ".docx"}
-SUPPORTED_FILES = SUPPORTED_IMAGES | SUPPORTED_DOCUMENTS
-MAX_FILE_BYTES = 10 * 1024 * 1024
-MAX_MODULES = 20
-
-
-def process_input(input_data):
-    """Return one stable multi-module request or its validation errors."""
-    errors = validate_modules_input(input_data)
-    if errors:
-        return None, errors
-
-    return {"modules": _normalize_modules(input_data["modules"])}, []
-
-
-def validate_modules_input(input_data):
-    """Return user-facing errors for a multi-module request."""
-    if not isinstance(input_data, dict):
-        return ["The request must be an object."]
-    modules = input_data.get("modules")
-    if not isinstance(modules, list) or not modules:
-        return ["Add at least one module."]
-    if len(modules) > MAX_MODULES:
-        return [f"A maximum of {MAX_MODULES} modules can be processed at once."]
-
-    errors = []
-    seen_module_names = set()
-    duplicate_names = set()
-    for index, module in enumerate(modules, start=1):
-        module_errors, normalized_name = _validate_module(module, index)
-        errors.extend(module_errors)
-        if normalized_name is not None:
-            if normalized_name in seen_module_names:
-                duplicate_names.add(normalized_name)
-            seen_module_names.add(normalized_name)
-
-    if duplicate_names:
-        errors.append(
-            f"Remove duplicate modules: {', '.join(sorted(duplicate_names))}."
-        )
-    return errors
-
-
-def _normalize_modules(raw_modules):
-    """Return modules in the stable shape used by downstream services."""
-    modules = []
-    for raw_module in raw_modules:
-        raw_credits = raw_module.get("credit_units")
-        credits = float(raw_credits) if raw_credits not in (None, "") else None
-        if credits is not None and credits.is_integer():
-            credits = int(credits)
-
-        modules.append(
-            {
-                "module_name": str(raw_module["module_name"]).strip().upper(),
-                "credit_units": credits,
-                "files": list(raw_module.get("files", [])),
-                "additional_context": str(
-                    raw_module.get("additional_context", "")
-                ).strip(),
-            }
-        )
-    return modules
-
-
-def _validate_module(module, index):
-    """Return one module's errors and its normalized name when available."""
-    prefix = f"Module {index}"
-    errors = []
-    if not isinstance(module, dict):
-        return [f"{prefix} must be an object."], None
-
-    name = module.get("module_name")
-    normalized_name = None
-    if not isinstance(name, str) or not name.strip():
-        errors.append(f"{prefix} needs a module name or code.")
-    else:
-        normalized_name = name.strip().upper()
-
-    errors.extend(_validate_credit_units(module.get("credit_units"), prefix))
-
-    context = module.get("additional_context", "")
-    files = module.get("files", [])
-    if not isinstance(context, str):
-        errors.append(f"{prefix} additional context must be text.")
-    if not isinstance(files, list):
-        errors.append(f"{prefix} files must be supplied as a list.")
-        return errors, normalized_name
-    if (not isinstance(context, str) or not context.strip()) and not files:
-        errors.append(f"{prefix} needs assessment information or a file.")
-    errors.extend(_validate_files(files, prefix))
-    return errors, normalized_name
-
-
-def _validate_credit_units(credit_units, prefix):
-    """Return an error when supplied credit units are outside the accepted range."""
-    if credit_units in (None, ""):
-        return []
-    try:
-        numeric_credits = float(credit_units)
-        if not 0 < numeric_credits <= 60:
-            raise ValueError
-    except (TypeError, ValueError):
-        return [f"{prefix} credit units must be a positive number."]
+def validate_module_count(module_count):
+    """Check that the frontend declared at least one module."""
+    if type(module_count) is not int or module_count < 1:
+        return ["Module count must be a positive integer."]
     return []
 
 
-def _validate_files(files, prefix):
-    """Return active-request errors for invalid evidence paths."""
+def validate_data_payload(data_payload):
+    """Check that the payload contains a non-empty modules list."""
+    if not isinstance(data_payload, dict):
+        return ["Data payload must be an object."]
+
+    modules = data_payload.get("modules")
+    if not isinstance(modules, list) or not modules:
+        return ["Data payload must contain at least one module."]
+    return []
+
+
+def validate_payload_module_count(module_count, data_payload):
+    """Check that the declared count matches the supplied modules."""
+    modules = data_payload["modules"]
+    if len(modules) != module_count:
+        return ["Module count does not match the data payload."]
+    return []
+
+
+def validate_module_objects(data_payload):
+    """Check that every module uses the expected object structure."""
+    modules = data_payload["modules"]
+    for module_index, module in enumerate(modules, start=1):
+        if not isinstance(module, dict):
+            return [f"Module {module_index} must be an object."]
+    return []
+
+
+def validate_module_names(data_payload):
+    """Check that every module has a readable name or code."""
     errors = []
-    for file_path in files:
-        path, issue = _check_file(file_path, SUPPORTED_FILES)
-        if issue == "missing":
-            errors.append(f"{prefix} file was not found: {file_path}")
-        elif issue == "unsupported":
-            errors.append(f"{prefix} has an unsupported file type: {path.name}")
-        elif issue == "oversized":
-            errors.append(f"{prefix} file exceeds 10 MB: {path.name}")
+    modules = data_payload["modules"]
+    for module_index, module in enumerate(modules, start=1):
+        module_name = module.get("module_name")
+        if not isinstance(module_name, str) or not module_name.strip():
+            errors.append(f"Module {module_index} requires a module name.")
     return errors
 
 
-def _check_file(file_path, supported_extensions):
-    """Return a path and its first filesystem or extension issue."""
-    path = Path(file_path) if isinstance(file_path, str) else None
-    if path is None or not path.is_file():
-        return path, "missing"
-    if path.suffix.lower() not in supported_extensions:
-        return path, "unsupported"
-    if path.stat().st_size > MAX_FILE_BYTES:
-        return path, "oversized"
-    return path, None
-
-
-def validate_input(input_data):
-    """Return user-facing errors for one module request."""
-    if not isinstance(input_data, dict):
-        return ["The request must be an object."]
-
+def validate_credit_units(data_payload):
+    """Check that supplied credit values are positive numbers."""
     errors = []
-    module = input_data.get("module")
-    prompt = input_data.get("prompt", "")
-    images = input_data.get("image_paths", [])
-
-    if not isinstance(module, str) or not module.strip():
-        errors.append("Module code is required.")
-    if not isinstance(prompt, str):
-        errors.append("Extra context must be text.")
-    if not isinstance(images, list):
-        return errors + ["Images must be supplied as a list."]
-    if not prompt.strip() and not images:
-        errors.append("Add at least one screenshot or some context.")
-
-    errors.extend(_validate_legacy_images(images))
+    modules = data_payload["modules"]
+    for module_index, module in enumerate(modules, start=1):
+        credit_units = module.get("credit_units")
+        credit_is_number = type(credit_units) in (int, float)
+        if credit_units is not None and not credit_is_number:
+            errors.append(f"Module {module_index} credit units must be a number.")
+        if credit_is_number and credit_units <= 0:
+            errors.append(f"Module {module_index} credit units must be positive.")
     return errors
 
 
-def _validate_legacy_images(images):
-    """Return legacy-request errors for invalid image paths."""
+def validate_image_paths(data_payload):
+    """Check that every module supplies its image paths as a list."""
     errors = []
-    for image in images:
-        _path, issue = _check_file(image, SUPPORTED_IMAGES)
-        if issue == "missing":
-            errors.append(f"Image was not found: {image}")
-        elif issue == "unsupported":
-            errors.append(f"Unsupported image type: {image}")
-        elif issue == "oversized":
-            errors.append(f"Image exceeds 10 MB: {image}")
+    modules = data_payload["modules"]
+    for module_index, module in enumerate(modules, start=1):
+        image_paths = module.get("files")
+        if not isinstance(image_paths, list):
+            errors.append(f"Module {module_index} files must be a list.")
     return errors
+
+
+def validate_repeating_schedule_data(repeating_schedule_data):
+    """Check that optional retry schedule data uses an object structure."""
+    if repeating_schedule_data is None:
+        return []
+    if not isinstance(repeating_schedule_data, dict):
+        return ["Repeating schedule data must be an object or null."]
+    return []
+
+
+def validate_input(module_count, data_payload, repeating_schedule_data=None):
+    """Run the complete validation flow and return its collected errors."""
+    errors = []
+
+    # Validate the top-level input before reading module contents.
+    module_count_errors = validate_module_count(module_count)
+    errors.extend(module_count_errors)
+
+    data_payload_errors = validate_data_payload(data_payload)
+    errors.extend(data_payload_errors)
+
+    if errors:
+        # Nested validation is unsafe when the top-level structure is invalid.
+        return errors
+
+    # Validate the repeated module structure before reading module fields.
+    payload_count_errors = validate_payload_module_count(module_count, data_payload)
+    errors.extend(payload_count_errors)
+
+    module_object_errors = validate_module_objects(data_payload)
+    errors.extend(module_object_errors)
+
+    if errors:
+        # Field validation requires the count and module objects to be valid.
+        return errors
+
+    # Validate each logical field and the optional retry data.
+    module_name_errors = validate_module_names(data_payload)
+    errors.extend(module_name_errors)
+
+    credit_unit_errors = validate_credit_units(data_payload)
+    errors.extend(credit_unit_errors)
+
+    image_path_errors = validate_image_paths(data_payload)
+    errors.extend(image_path_errors)
+
+    schedule_errors = validate_repeating_schedule_data(repeating_schedule_data)
+    errors.extend(schedule_errors)
+
+    # Return every logical input error to the caller in one result.
+    return errors
+
+
+def prepare_ai_input(module_count, data_payload, repeating_schedule_data=None):
+    """Return validated frontend data in the shape expected by the AI manager."""
+    errors = validate_input(
+        module_count,
+        data_payload,
+        repeating_schedule_data,
+    )
+    if errors:
+        # Invalid frontend data stops before the AI manager is called.
+        return None, errors
+
+    ai_input = {
+        "module_count": module_count,
+        "modules": data_payload["modules"],
+        "repeating_schedule_data": repeating_schedule_data,
+    }
+    return ai_input, []

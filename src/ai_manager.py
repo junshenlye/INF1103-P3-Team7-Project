@@ -61,15 +61,16 @@ Return every reliable fact and turn uncertainty into concise evidence requests.
 # Active multi-module API
 
 
-def process(input_data, trimester_context, api_caller=None):
+def process(input_data, api_caller=None):
     """Synchronous entry point for the current Flask request path."""
     _require_no_running_loop("process", "process_async")
-    return asyncio.run(process_async(input_data, trimester_context, api_caller))
+    return asyncio.run(process_async(input_data, api_caller))
 
 
-async def process_async(input_data, trimester_context, api_caller=None):
+async def process_async(input_data, api_caller=None):
     """Extract modules as concurrent network tasks, preserving input order."""
     requested_modules = input_data.get("modules", [])
+    repeating_schedule_data = input_data.get("repeating_schedule_data")
     if not requested_modules:
         return _assemble_result([], [], [], [], [])
 
@@ -84,7 +85,7 @@ async def process_async(input_data, trimester_context, api_caller=None):
         *(
             _extract_module(
                 module,
-                trimester_context,
+                repeating_schedule_data,
                 api_caller,
                 request_slots,
             )
@@ -208,7 +209,12 @@ def _concurrent_request_limit(module_count):
     return max(1, min(module_count, configured, MAX_CONCURRENT_REQUESTS))
 
 
-async def _extract_module(module, trimester_context, api_caller, request_slots):
+async def _extract_module(
+    module,
+    repeating_schedule_data,
+    api_caller,
+    request_slots,
+):
     module_name = module["module_name"]
     api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
     if api_caller is None and not api_key:
@@ -223,7 +229,10 @@ async def _extract_module(module, trimester_context, api_caller, request_slots):
             ],
         }
 
-    prompt, document_comments = _build_pacing_prompt(module, trimester_context)
+    prompt, document_comments = _build_pacing_prompt(
+        module,
+        repeating_schedule_data,
+    )
     image_paths = [
         path
         for path in module.get("files", [])
@@ -286,7 +295,7 @@ async def _extract_module(module, trimester_context, api_caller, request_slots):
     }
 
 
-def _build_pacing_prompt(module, trimester_context):
+def _build_pacing_prompt(module, repeating_schedule_data):
     document_parts = []
     comments = []
     remaining_chars = MAX_DOCUMENT_CHARS
@@ -311,14 +320,13 @@ def _build_pacing_prompt(module, trimester_context):
             )
             comments.append(f"{path.name} could not be read as assessment evidence.")
 
-    return (
-        _format_pacing_prompt(
-            module,
-            trimester_context,
-            "\n".join(document_parts),
-        ),
-        comments,
+    document_text = "\n".join(document_parts)
+    prompt = _format_pacing_prompt(
+        module,
+        document_text,
+        repeating_schedule_data,
     )
+    return prompt, comments
 
 
 def _read_document_text(path):
@@ -338,12 +346,11 @@ def _read_document_text(path):
     raise ValueError("Unsupported document type")
 
 
-def _format_pacing_prompt(module, trimester_context, document_text):
-    calendar_fields = ("week", "start_date", "end_date", "label")
-    calendar = [
-        {key: item[key] for key in calendar_fields}
-        for item in trimester_context.get("weeks", [])
-    ]
+def _format_pacing_prompt(module, document_text, repeating_schedule_data):
+    schedule_context = "None"
+    if repeating_schedule_data is not None:
+        schedule_context = json.dumps(repeating_schedule_data, separators=(",", ":"))
+
     return (
         "Extract every graded assessment from this module. Recognise quizzes, "
         "assignments, projects, reports, presentations, labs, practicals, "
@@ -352,11 +359,14 @@ def _format_pacing_prompt(module, trimester_context, document_text):
         "graded for this student. Keep items sharing one weight together. Split "
         "only independently weighted items. For recurring work, give exact weeks "
         "when known. For multi-week work, give start and end weeks. A weight of "
-        "30 means 30%. Preserve supplied credits and use ISO YYYY-MM-DD dates.\n\n"
+        "30 means 30%. Preserve supplied credits and use ISO YYYY-MM-DD dates. "
+        "Treat existing schedule data as retry context: keep supported facts, "
+        "correct them when the current evidence is clearer, and do not duplicate "
+        "assessments.\n\n"
         f"Module: {module['module_name']}\n"
         f"Credit units: {module.get('credit_units')}\n"
         f"Additional context: {module.get('additional_context') or 'None'}\n"
-        f"Trimester calendar: {json.dumps(calendar, separators=(',', ':'))}\n"
+        f"Existing repeating schedule data: {schedule_context}\n"
         f"Document text:\n{document_text or 'None; inspect supplied images.'}"
     )
 
