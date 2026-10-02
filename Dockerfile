@@ -12,10 +12,9 @@ COPY requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir --requirement requirements.txt
 
 COPY --chown=appuser:appuser src ./src
-COPY --chown=appuser:appuser helpers ./helpers
 
 USER appuser
 
 EXPOSE 8000
 
-ENTRYPOINT ["python", "helpers/api_server.py"]
+ENTRYPOINT ["python", "-m", "src.main"]

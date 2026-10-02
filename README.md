@@ -1,9 +1,8 @@
 # Stackplan MVP
 
-Stackplan converts assessment evidence from any number of modules into one
-trimester pacing timeline. It describes workload timing, importance, weekly
-pressure, overlaps, clusters, and incomplete evidence. It does not create study
-plans or recommend how a student should spend their time.
+Stackplan extracts assessment evidence from any number of modules and returns
+canonical module data for the frontend. Logic Manager preserves the extracted
+facts and adds one deterministic schedule weight to each graded or bonus item.
 
 ## Flow
 
@@ -11,83 +10,74 @@ plans or recommend how a student should spend their time.
 Frontend Demo
   -> IO Manager validates and normalizes all modules
   -> AI Manager extracts assessment facts and uncertainty
-  -> Logic Manager calculates importance, proximity, ranking, and pressure
+  -> Logic Manager calculates assessment weightage × module credits
   -> Data Manager stores input, extraction, and the final result
-  -> Frontend renders the pacing timeline
+  -> Frontend sorts the assessments and builds its own timeline
 ```
 
-`src/main.py` remains the orchestration layer. The former one-module Python
-entry point is retained for compatibility, while the frontend uses the new
+`src/main.py` remains the orchestration layer and the frontend uses the
 `{"modules": [...]}` request.
 
 ## Deterministic calculations
 
-- Academic importance = assessment weightage × module credit units.
-- Weeks remaining = due week − current trimester week.
-- Proximity = 0 for past assessments; otherwise
-  `1 / max(weeks_remaining, 1)`.
-- Relative score = academic importance × proximity.
-- Every module is validated independently: effective assessment weights must
-  total 100%. Collective recurring weights count once; genuine per-occurrence
-  weights count once per occurrence.
-- Weekly pressure score = five points per assessment occurrence + the sum of
-  academic importance divided by ten.
-- Pressure labels are `low` (<15), `moderate` (<35), `high` (<65), and
-  `very_high` (65+).
+- Schedule weight = extracted assessment weightage × module credits.
+- Module and assessment order is preserved.
+- No rank, deadline tier, pressure, overlap, cluster, or timeline is calculated.
+- Recurrence, dates, weeks, comments, assumptions, confidence, and missing
+  information are copied unchanged for the frontend.
 
-Recurring assessments contribute to every known occurrence week. Multi-week
-assessments contribute throughout their known range. Missing weightages, credit
-units, or weeks remain visible as comments/checklist items rather than causing
-the whole pipeline to fail.
+Each module runs through the same three-stage chain: a fast image relevance
+precheck, evidence-only context extraction, and text-only schedule reasoning.
+The default models are `qwen3.7-flash`, `qwen3.7-plus`, and `qwen3.7-plus`
+respectively. Override them with `AI_PRECHECK_MODEL`, `AI_CONTEXT_MODEL`, and
+`AI_REASONING_MODEL`.
 
-Each module is extracted in its own asynchronous model request. Up to five API
-requests are in flight by default (`AI_MAX_CONCURRENT_REQUESTS`), keeping
-evidence contexts small and reducing multi-module latency without a worker-thread
-pool. The former `AI_MAX_PARALLEL_MODULES` setting remains a fallback alias. A
-recurring participation weight marked as `total` is spread across its occurrence
-weeks for pressure calculations; the full percentage is never counted once per
-week.
+The reasoning stage uses non-thinking mode with a compact output limit because
+the evidence has already been extracted and the output follows a strict schema.
+Each model call has a 45-second limit with no automatic retry, and the complete AI request
+has a 240-second limit. Override these with `AI_MODEL_TIMEOUT_SECONDS`,
+`AI_MODEL_RETRIES`, and `AI_REQUEST_TIMEOUT_SECONDS`.
+
+Multiple modules use this same chain concurrently. Two model calls are in flight
+by default (`AI_MAX_CONCURRENT_REQUESTS`) and results remain in frontend order.
+Task 3
+classifies visible rows as graded, aggregate, bonus, ungraded, or uncertain.
+Only unusable input or a processing failure rejects the request.
+
+When one module fails but another succeeds, the request returns
+`partial_success`. Failed modules are listed separately and successful modules
+continue through Logic Manager and Data Manager.
 
 ### Code map
 
-- `src/ai_manager.py`: the single AI boundary. It owns active and compatibility
-  prompts, model requests, schemas, parsing, and normalization so those rules do
-  not drift across several files.
+- `src/io_manager.py`: validates frontend fields once and classifies each accepted
+  path into canonical `images` or `documents` data for downstream managers.
+- `src/ai_manager.py`: the AI boundary. It owns the three prompts, model requests,
+  response schemas, one normalization pass, and one grouped module-failure payload.
 - `process`: is the synchronous Flask-compatible wrapper around `process_async`.
   The async function gathers independent requests in their original order. Each
   reply is normalized once before the final result is assembled.
-- `_extract_module`: runs one module request, handles fallback models, and keeps
-  failures isolated to that module.
-- `_build_pacing_prompt`: reads only that module's non-image evidence, then asks
-  the local prompt formatter to construct the request.
-- `_call_model`: is the one asynchronous OpenAI-compatible transport used by
-  both request contracts; small wrappers supply the appropriate prompt and
-  schema.
-- `_pacing_schema` and `_legacy_schema`: define their strict JSON contracts from
-  shared schema builders, including recurring weight scope.
-- `_normalize_module_result`: validates model field types, numeric bounds, and
-  recurrence structure without module- or test-case-specific lookup tables.
-- `validate_ai_output`: remains an external/raw-result compatibility boundary.
-  The live `process` path uses `_assemble_result` and does not normalize its
-  already-normalized modules again.
-- `extract_assessments`: retains the former one-module API in the same manager
-  and reuses the common transport, parser, scoring, and numeric normalization.
-- `src/logic_manager.py`: owns the trimester calendar data and every
-  deterministic calculation.
+- `_extract_module`: visibly runs precheck, context extraction, and final
+  reasoning for one module. A module failure stays isolated to that module.
+- `_call_model`: is the asynchronous OpenAI-compatible transport used by the
+  extraction flow.
+- `_pacing_schema`: defines the strict model response contract, including
+  recurring weight scope.
+- `_normalize_module_result`: converts the final reasoning output to the
+  canonical module shape without repairing fractional weights or inferred weeks.
+- `src/logic_manager.py`: preserves canonical module data, calculates schedule
+  weight, and groups hard AI failures.
 
-The former one-module API and tests still work, but there is no longer a proxy
-or a second AI implementation to keep in sync.
-
-The calendar has one source of truth in `src/logic_manager.py`. The current
-configuration is SIT AY2026/27 Trimester 1 (31 August–6 December 2026), including
-recess in Week 7 and final assessment in Week 14. Its generated data is injected
-into the AI prompt; the dates are not duplicated in prompt text.
+The AI Manager has one multi-module extraction path; each module is processed
+independently through the same prompt, schema, and normalization flow.
 
 ## Run
 
 Copy `.env.example` to `.env` and provide `DASHSCOPE_API_KEY`.
 
 ```sh
+docker compose up -d --build backend
+
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
@@ -96,23 +86,32 @@ python frontend-demo/app.py
 
 - Frontend: http://127.0.0.1:5050
 - Extraction endpoint: http://127.0.0.1:5050/api/extractions
+- Stored module data: http://127.0.0.1:5050/api/data
 - Health: http://127.0.0.1:5050/health
 
 The frontend accepts images, PDF, DOCX, and simple text-based files. Uploads
-exist only for the duration of one request. The Flask app calls `src/main.py`
-directly and runs on the host; it is not built into the Docker Compose stack.
-
-Run `docker compose up -d db` and set
-`DATABASE_URL=postgresql://stackplan:stackplan_dev@127.0.0.1:5433/stackplan`
-before starting Flask. Docker Compose starts only PostgreSQL; Flask always runs
-independently on the host. There is no local JSON persistence fallback.
+exist only for the duration of one request. The Flask frontend runs on the host
+and sends newline-delimited JSON to the persistent backend container at
+`127.0.0.1:8000`. The backend container communicates with PostgreSQL through the
+Compose network. There is no local JSON persistence fallback.
 
 The Compose database is intentionally disposable: PostgreSQL stores its data in
 container memory rather than a named or host volume. `docker compose restart db`
 or `docker compose down` clears the database so the next start is a clean test
-run. This reset applies when Flask is using the `DATABASE_URL` above. If
-`DATABASE_URL` is unset, storage is unavailable rather than silently switching
-to another persistent data source.
+run. If `DATABASE_URL` is unset, storage is unavailable rather than silently
+switching to another persistent data source.
+
+After an extraction, the frontend shows the measured IO Manager, AI Manager,
+Logic Manager, Data Manager, and end-to-end request runtimes. It also shows each
+module/model/stage duration and any skipped module. This last-run display is kept
+in the browser session; the assessment data itself is loaded from PostgreSQL
+through Data Manager.
+
+The frontend scheduler derives its columns from the highest supplied `due_week`.
+Weeks are displayed horizontally. Assessments with the same due week are stacked
+vertically by descending `schedule_weight`. Recurring or incomplete items without
+a due week remain in a separate timing-missing list and are never expanded or
+placed by assumption.
 
 ## Test
 
