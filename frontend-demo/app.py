@@ -4,8 +4,10 @@ import json
 import logging
 import os
 from pathlib import Path
+import socket
 import sys
 import tempfile
+import time
 from urllib import error as url_error
 from urllib import request as url_request
 
@@ -17,11 +19,12 @@ from werkzeug.utils import secure_filename
 
 FRONTEND_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = FRONTEND_ROOT.parent
+UPLOAD_ROOT = PROJECT_ROOT / ".runtime-uploads"
+BACKEND_UPLOAD_ROOT = Path("/app/uploads")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src import data_manager  # noqa: E402
-from src import main as core_main  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
@@ -30,23 +33,14 @@ LOGGER = logging.getLogger(__name__)
 def load_dashboard(api_url=None):
     """Read locally by default, retaining an explicit remote-API option."""
     if not api_url:
-        return core_main.get_dashboard(), None
+        dashboard = data_manager.load_plan()
+        return dashboard, None
     try:
         with url_request.urlopen(f"{api_url}/api/dashboard", timeout=8) as response:
             return json.loads(response.read().decode("utf-8")), None
     except (OSError, ValueError, json.JSONDecodeError, url_error.HTTPError):
         return {
-            "trimester_context": {},
-            "current_week": None,
-            "relative_assessment_ranking": [],
-            "module_weight_coverage": [],
-            "timeline": [],
-            "pressure_by_week": [],
-            "overlaps": [],
-            "clusters": [],
-            "overall_pacing": {},
-            "comments": [],
-            "user_checklist": [],
+            "modules": [],
         }, f"The configured API is unavailable at {api_url}."
 
 
@@ -59,8 +53,39 @@ def save_uploaded_files(uploaded_files, target_directory, name_prefix=""):
         safe_name = secure_filename(uploaded_file.filename) or f"upload-{index}"
         path = Path(target_directory) / f"{name_prefix}{index}-{safe_name}"
         uploaded_file.save(path)
-        paths.append(str(path))
+        path.chmod(0o644)
+
+        relative_path = path.relative_to(UPLOAD_ROOT)
+        backend_path = BACKEND_UPLOAD_ROOT / relative_path
+        paths.append(str(backend_path))
     return paths
+
+
+def send_backend_request(data_payload):
+    """Send one JSON request to the persistent backend container."""
+    request_text = json.dumps(data_payload)
+    request_line = request_text + "\n"
+    request_bytes = request_line.encode("utf-8")
+
+    backend_host = os.getenv("BACKEND_HOST", "127.0.0.1")
+    backend_port = int(os.getenv("BACKEND_PORT", "8000"))
+
+    backend_socket = socket.create_connection(
+        (backend_host, backend_port),
+        timeout=10,
+    )
+    backend_socket.settimeout(300)
+    with backend_socket:
+        backend_file = backend_socket.makefile("rwb")
+        backend_file.write(request_bytes)
+        backend_file.flush()
+        response_bytes = backend_file.readline()
+
+    if not response_bytes:
+        raise RuntimeError("The backend container returned no response.")
+
+    response_text = response_bytes.decode("utf-8")
+    return json.loads(response_text)
 
 
 def frontend_modules(form, files, target_directory):
@@ -101,7 +126,20 @@ def frontend_modules(form, files, target_directory):
         modules.append(module)
 
     actual_module_count = len(modules)
+    raw_recess_weeks = form.get("recess_weeks", "")
+    recess_weeks = []
+    for raw_week in raw_recess_weeks.split(","):
+        week_text = raw_week.strip()
+        if not week_text:
+            continue
+        try:
+            recess_week = int(week_text)
+        except ValueError:
+            recess_week = week_text
+        recess_weeks.append(recess_week)
+
     return {
+        "calendar": {"recess_weeks": recess_weeks},
         "module_count": actual_module_count,
         "modules": modules,
     }
@@ -118,6 +156,7 @@ def create_app(configured_api_url=None):
     )
     app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
     data_manager.initialize_storage()
+    UPLOAD_ROOT.mkdir(exist_ok=True)
 
     @app.get("/")
     def index():
@@ -131,20 +170,47 @@ def create_app(configured_api_url=None):
 
     @app.post("/api/extractions")
     def extraction_api():
+        frontend_started_at = time.perf_counter()
         try:
-            with tempfile.TemporaryDirectory(prefix="assessment-upload-") as directory:
-                result = core_main.process_request(
-                    frontend_modules(request.form, request.files, directory)
+            with tempfile.TemporaryDirectory(
+                prefix="assessment-upload-",
+                dir=UPLOAD_ROOT,
+            ) as directory:
+                directory_path = Path(directory)
+                directory_path.chmod(0o755)
+                data_payload = frontend_modules(
+                    request.form,
+                    request.files,
+                    directory,
                 )
+                result = send_backend_request(data_payload)
         except Exception:
             LOGGER.exception("Assessment extraction stopped unexpectedly")
-            return jsonify(
-                {"errors": ["The pacing timeline could not be created."]}
-            ), 500
+            frontend_finished_at = time.perf_counter()
+            frontend_total_ms = round(
+                (frontend_finished_at - frontend_started_at) * 1000,
+                2,
+            )
+            error_result = {
+                "errors": ["The assessment data could not be created."],
+                "runtime": {"frontend_total_ms": frontend_total_ms},
+            }
+            return jsonify(error_result), 500
+
+        frontend_finished_at = time.perf_counter()
+        frontend_total_ms = round(
+            (frontend_finished_at - frontend_started_at) * 1000,
+            2,
+        )
+        runtime = result.get("runtime")
+        if not isinstance(runtime, dict):
+            runtime = {}
+        runtime["frontend_total_ms"] = frontend_total_ms
+        result["runtime"] = runtime
         return jsonify(result), (200 if result.get("ok") else 400)
 
-    @app.get("/api/schedule")
-    def schedule_api():
+    @app.get("/api/data")
+    def data_api():
         dashboard, connection_error = load_dashboard(api_url)
         if connection_error:
             return jsonify({"errors": [connection_error]}), 503

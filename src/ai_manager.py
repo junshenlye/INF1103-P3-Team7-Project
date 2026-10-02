@@ -1,10 +1,4 @@
-"""Send assessment evidence to an AI model and normalize its replies.
-
-The active API extracts each module independently. ``extract_assessments``
-keeps the original one-module API available for callers that still use it.
-Transport, prompts, schemas, parsing, and normalization live together here so
-both paths share one small set of model-facing helpers.
-"""
+"""Extract structured assessment facts from module evidence."""
 
 import asyncio
 import base64
@@ -13,7 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
-import re
+import time
 import zipfile
 from xml.etree import ElementTree
 
@@ -23,26 +17,43 @@ from openai import AsyncOpenAI, OpenAIError
 LOGGER = logging.getLogger(__name__)
 
 DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-PRIMARY_MODEL = "qwen3.7-plus"
-BACKUP_MODEL = "qwen3.7-flash"
-SUPPORTED_IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-IMAGE_MEDIA_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
+PRECHECK_MODEL = "qwen3.7-flash"
+CONTEXT_MODEL = "qwen3.7-plus"
+REASONING_MODEL = "qwen3.7-plus"
 MAX_DOCUMENT_CHARS = 12_000
-DEFAULT_CONCURRENT_REQUESTS = 5
+DEFAULT_CONCURRENT_REQUESTS = 2
 MAX_CONCURRENT_REQUESTS = 8
+DEFAULT_MODEL_TIMEOUT_SECONDS = 45
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 240
+DEFAULT_MODEL_RETRIES = 0
 
-PACING_SYSTEM_PROMPT = """Extract academic assessment facts into the supplied JSON schema.
+PRECHECK_SYSTEM_PROMPT = """Classify whether each supplied image contains readable
+assessment scheduling evidence for the named module. Do not extract a schedule.
+Return uncertain when relevance cannot be safely rejected."""
+
+CONTEXT_SYSTEM_PROMPT = """Copy explicit academic assessment evidence into the
+supplied JSON schema. Preserve source wording and source IDs. Do not infer missing
+facts, reconcile conflicts, calculate totals, or create a schedule."""
+
+REASONING_SYSTEM_PROMPT = """Reconcile supplied assessment evidence into the
+supplied schedule schema.
 
 Rules:
 - Never invent dates, weeks, weights, recurrence, credits, or assessment status.
 - Do not give study advice or calculate priority, pressure, or relative scores.
 - Return partial facts when evidence is incomplete; use null for unknown fields.
+- Preserve every visible item, but classify how it affects the module total:
+  graded for an independently weighted assessment, aggregate for a parent summary,
+  bonus for marks outside the normal total, ungraded for zero-mark practice or
+  formative work, and uncertain when the evidence cannot decide.
+- Do not count both an aggregate parent and its independently weighted children.
+- Do not force the graded items to total 100%. Missing or unusual totals are valid
+  incomplete evidence and must be explained for later user review.
+- A clearly stated teaching week is sufficient scheduling evidence. Do not request
+  a calendar date when an exact week is already known.
+- A total weight and known week range are sufficient for recurring participation.
+  Do not request a per-week weight breakdown unless the source says each occurrence
+  is weighted separately.
 - Keep feedback compact: one missing-information item per assessment and no more
   than three checklist items for the module. Do not repeat the same issue.
 - Participation, attendance, tutorial engagement, and student engagement are
@@ -53,18 +64,15 @@ Rules:
 - Return JSON only. Use a hard error only when the request cannot be processed.
 """
 
-LEGACY_SYSTEM_PROMPT = """Extract academic assessment facts without guessing.
-Return every reliable fact and turn uncertainty into concise evidence requests.
-"""
-
-
-# Active multi-module API
+# Multi-module extraction
 
 
 def process(input_data, api_caller=None):
     """Synchronous entry point for the current Flask request path."""
     _require_no_running_loop("process", "process_async")
-    return asyncio.run(process_async(input_data, api_caller))
+    process_coroutine = process_async(input_data, api_caller)
+    result = asyncio.run(process_coroutine)
+    return result
 
 
 async def process_async(input_data, api_caller=None):
@@ -72,121 +80,130 @@ async def process_async(input_data, api_caller=None):
     requested_modules = input_data.get("modules", [])
     repeating_schedule_data = input_data.get("repeating_schedule_data")
     if not requested_modules:
-        return _assemble_result([], [], [], [], [])
+        return {
+            "modules": [],
+            "failures": [],
+            "models_used": [],
+            "model_runs": [],
+        }
 
-    request_limit = _concurrent_request_limit(len(requested_modules))
+    module_count = len(requested_modules)
+    request_limit = _concurrent_request_limit(module_count)
     LOGGER.info(
         "Extracting %d module(s) with up to %d concurrent request(s)",
-        len(requested_modules),
+        module_count,
         request_limit,
     )
     request_slots = asyncio.Semaphore(request_limit)
-    results = await asyncio.gather(
-        *(
-            _extract_module(
-                module,
-                repeating_schedule_data,
-                api_caller,
-                request_slots,
-            )
-            for module in requested_modules
+    module_tasks = []
+    for module in requested_modules:
+        extraction = _extract_module(
+            module,
+            repeating_schedule_data,
+            api_caller,
+            request_slots,
         )
+        module_task = asyncio.create_task(extraction)
+        module_tasks.append(module_task)
+
+    raw_request_timeout = os.getenv(
+        "AI_REQUEST_TIMEOUT_SECONDS",
+        str(DEFAULT_REQUEST_TIMEOUT_SECONDS),
     )
+    try:
+        request_timeout = float(raw_request_timeout)
+    except ValueError:
+        request_timeout = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    if request_timeout <= 0:
+        request_timeout = DEFAULT_REQUEST_TIMEOUT_SECONDS
 
-    modules = [result["module"] for result in results]
-    global_comments = [
-        comment
-        for result in results
-        for comment in result.get("global_comments", [])
-    ]
-    checklist = [
-        item
-        for result in results
-        for item in result.get("user_checklist", [])
-    ]
-    models_used = [
-        result["model_used"] for result in results if result.get("model_used")
-    ]
-    return _assemble_result(
-        modules,
-        requested_modules,
-        global_comments,
-        checklist,
-        models_used,
+    completed_tasks, pending_tasks = await asyncio.wait(
+        module_tasks,
+        timeout=request_timeout,
     )
+    for pending_task in pending_tasks:
+        pending_task.cancel()
+    if pending_tasks:
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
 
-
-def validate_ai_output(ai_result, expected_modules=None):
-    """Normalize an externally supplied active result.
-
-    ``process`` already normalizes each module and therefore skips this public
-    compatibility boundary. Keeping the paths separate prevents every live
-    response from being normalized twice.
-    """
-    if not isinstance(ai_result, dict):
-        raise ValueError("AI output must be an object.")
-
-    expected_by_name = _modules_by_name(expected_modules or [])
-    modules = []
-    global_comments = _text_list(ai_result.get("global_comments"))
-    for raw_module in _list_or_empty(ai_result.get("modules")):
-        if not isinstance(raw_module, dict):
-            global_comments.append(
-                "One module result was malformed and could not be used."
-            )
-            continue
-        name = _module_name(raw_module)
-        if not name:
-            global_comments.append("One module result had no module reference.")
-            continue
-        supplied = expected_by_name.get(
-            name,
-            {"module_name": name, "credit_units": None},
-        )
-        modules.append(_normalize_module_result(raw_module, supplied)["module"])
-
-    return _assemble_result(
-        modules,
-        expected_modules or [],
-        global_comments,
-        _text_list(ai_result.get("user_checklist")),
-        _text_list(ai_result.get("models_used")),
-    )
-
-
-def _assemble_result(
-    modules,
-    expected_modules,
-    global_comments,
-    checklist,
-    models_used,
-):
-    """Add cross-module feedback without re-normalizing module contents."""
-    expected_by_name = _modules_by_name(expected_modules)
-    result_modules = list(modules)
-    found = {_module_name(module) for module in result_modules}
-
-    for module in result_modules:
-        if module.get("credit_units") is None:
-            checklist.append(
-                f"{module['module_name']}: Provide the module credit units."
-            )
-
-    for name, supplied in expected_by_name.items():
-        if name not in found:
-            result_modules.append(
-                _empty_module_result(
-                    supplied,
-                    "No AI result was returned for this module.",
+    results = []
+    for module_index, module_task in enumerate(module_tasks):
+        if module_task in completed_tasks:
+            completed_module = requested_modules[module_index]
+            module_name = completed_module["module_name"]
+            try:
+                module_result = module_task.result()
+            except Exception:
+                LOGGER.exception(
+                    "AI module pipeline stopped unexpectedly module=%s",
+                    module_name,
                 )
-            )
-            checklist.append(f"{name}: Provide clearer assessment information.")
+                module_result = {
+                    "module": {
+                        "module_name": module_name,
+                        "credit_units": completed_module.get("credit_units"),
+                        "assessments": [],
+                        "comments": [],
+                    },
+                    "failure": {
+                        "module_name": module_name,
+                        "stage": "pipeline",
+                        "category": "system_failure",
+                        "message": "The AI service could not process this module.",
+                    },
+                    "models_used": [],
+                    "model_runs": [],
+                }
+            results.append(module_result)
+            continue
 
+        timed_out_module = requested_modules[module_index]
+        module_name = timed_out_module["module_name"]
+        timeout_result = {
+            "module": {
+                "module_name": module_name,
+                "credit_units": timed_out_module.get("credit_units"),
+                "assessments": [],
+                "comments": [],
+            },
+            "failure": {
+                "module_name": module_name,
+                "stage": "pipeline",
+                "category": "system_failure",
+                "message": "The module exceeded the AI request time limit.",
+            },
+            "models_used": [],
+            "model_runs": [
+                {
+                    "module_name": module_name,
+                    "stage": "pipeline",
+                    "model": None,
+                    "status": "timed_out",
+                    "duration_ms": round(request_timeout * 1000, 2),
+                }
+            ],
+        }
+        results.append(timeout_result)
+
+    modules = []
+    failures = []
+    models_used = []
+    model_runs = []
+    for result in results:
+        failure = result.get("failure")
+        if failure is None:
+            modules.append(result["module"])
+        else:
+            failures.append(failure)
+        result_models = result.get("models_used", [])
+        models_used.extend(result_models)
+        result_runs = result.get("model_runs", [])
+        model_runs.extend(result_runs)
     return {
-        "modules": result_modules,
-        "global_comments": _unique_text(global_comments),
-        "user_checklist": _unique_text(checklist)[:10],
+        "modules": modules,
+        "failures": failures,
         "models_used": _unique_text(models_used),
+        "model_runs": model_runs,
     }
 
 
@@ -194,19 +211,17 @@ def _assemble_result(
 
 
 def _concurrent_request_limit(module_count):
+    default_limit = str(DEFAULT_CONCURRENT_REQUESTS)
+    configured_value = os.getenv(
+        "AI_MAX_CONCURRENT_REQUESTS",
+        default_limit,
+    )
     try:
-        configured = int(
-            os.getenv(
-                "AI_MAX_CONCURRENT_REQUESTS",
-                os.getenv(
-                    "AI_MAX_PARALLEL_MODULES",
-                    str(DEFAULT_CONCURRENT_REQUESTS),
-                ),
-            )
-        )
+        configured = int(configured_value)
     except ValueError:
         configured = DEFAULT_CONCURRENT_REQUESTS
-    return max(1, min(module_count, configured, MAX_CONCURRENT_REQUESTS))
+    upper_limit = min(module_count, configured, MAX_CONCURRENT_REQUESTS)
+    return max(1, upper_limit)
 
 
 async def _extract_module(
@@ -215,96 +230,392 @@ async def _extract_module(
     api_caller,
     request_slots,
 ):
+    """Run precheck, context extraction, and reasoning for one module."""
     module_name = module["module_name"]
+    images = module["images"]
+    documents = module["documents"]
     api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
     if api_caller is None and not api_key:
         return {
-            "module": _empty_module_result(
-                module,
-                "The AI service is not configured, so assessment evidence was not extracted.",
-            ),
-            "global_comments": [],
-            "user_checklist": [
-                f"Configure the AI service to extract assessment details for {module_name}."
-            ],
+            "module": {
+                "module_name": module_name,
+                "credit_units": module.get("credit_units"),
+                "assessments": [],
+                "comments": [],
+            },
+            "failure": {
+                "module_name": module_name,
+                "stage": "configuration",
+                "category": "system_failure",
+                "message": "The AI service is not configured.",
+            },
+            "models_used": [],
+            "model_runs": [],
         }
 
-    prompt, document_comments = _build_pacing_prompt(
-        module,
-        repeating_schedule_data,
-    )
-    image_paths = [
-        path
-        for path in module.get("files", [])
-        if Path(path).suffix.lower() in SUPPORTED_IMAGE_TYPES
-    ]
-    caller = api_caller or _call_pacing_model
-    best_result = None
-    for attempt, model in enumerate(_model_route(), start=1):
-        try:
+    models_used = []
+    model_runs = []
+    current_stage = "precheck"
+    current_model = None
+    stage_started_at = None
+    stage_in_progress = False
+
+    try:
+        accepted_images = images
+        precheck_result = None
+        if images:
+            precheck_model = os.getenv("AI_PRECHECK_MODEL", PRECHECK_MODEL)
+            precheck_prompt = _format_precheck_prompt(module, images)
+            current_model = precheck_model
             async with request_slots:
-                reply = await _invoke_caller(
-                    caller,
-                    prompt=prompt,
-                    image_paths=image_paths,
-                    api_key=api_key if api_caller is None else "",
-                    model=model,
-                    structured_output=attempt > 1,
+                stage_started_at = time.perf_counter()
+                stage_in_progress = True
+                precheck_result = await _run_model_stage(
+                    stage="precheck",
+                    prompt=precheck_prompt,
+                    images=images,
+                    api_key=api_key,
+                    model=precheck_model,
+                    system_prompt=PRECHECK_SYSTEM_PROMPT,
+                    tool_name="submit_image_precheck",
+                    tool_description="Classify the relevance of each supplied image.",
+                    schema=_precheck_schema(),
+                    max_tokens=4_096,
+                    reasoning_effort="none",
+                    api_caller=api_caller,
                 )
-            parsed = _parse_model_reply(
-                reply,
-                tool_name="submit_module_facts",
-                module_name=module_name,
+            stage_in_progress = False
+            stage_finished_at = time.perf_counter()
+            stage_duration_ms = round(
+                (stage_finished_at - stage_started_at) * 1000,
+                2,
             )
-            result = _normalize_module_result(parsed, module)
-            result["module"]["comments"] = _unique_text(
-                result["module"]["comments"] + document_comments
+            model_runs.append(
+                {
+                    "module_name": module_name,
+                    "stage": current_stage,
+                    "model": current_model,
+                    "status": "completed",
+                    "duration_ms": stage_duration_ms,
+                }
             )
-            result["model_used"] = model
-            if best_result is None or _result_score(
-                result["module"]["assessments"],
-                weight_key="weightage_percent",
-                timing_key="due_week",
-            ) > _result_score(
-                best_result["module"]["assessments"],
-                weight_key="weightage_percent",
-                timing_key="due_week",
-            ):
-                best_result = result
-            if result["module"]["assessments"]:
-                return result
-        except (ConnectionError, OSError, TypeError, ValueError, KeyError) as error:
-            LOGGER.warning(
-                "Pacing extraction failed for %s via %s: %s",
+            LOGGER.info(
+                "AI stage completed module=%s stage=%s model=%s duration_ms=%s",
                 module_name,
-                model,
-                _safe_error(error),
+                current_stage,
+                current_model,
+                stage_duration_ms,
+            )
+            models_used.append(precheck_model)
+            accepted_images = _accepted_images(
+                images,
+                precheck_result,
             )
 
-    if best_result:
-        return best_result
-    return {
-        "module": _empty_module_result(
+            if not accepted_images:
+                raw_comments = precheck_result.get("comments")
+                comments = _text_list(raw_comments)
+                if not comments:
+                    comments = ["The supplied images are not relevant to this module schedule."]
+                return {
+                    "module": {
+                        "module_name": module_name,
+                        "credit_units": module.get("credit_units"),
+                        "assessments": [],
+                        "comments": [],
+                    },
+                    "failure": {
+                        "module_name": module_name,
+                        "stage": "precheck",
+                        "category": "rejected_input",
+                        "message": comments[0],
+                    },
+                    "models_used": models_used,
+                    "model_runs": model_runs,
+                }
+
+        current_stage = "context"
+        document_text, document_comments = _read_module_documents(documents)
+        context_model = os.getenv("AI_CONTEXT_MODEL", CONTEXT_MODEL)
+        context_prompt = _format_context_prompt(
             module,
-            "The AI service did not return usable structured assessment information.",
-        ),
-        "global_comments": [],
-        "user_checklist": [
-            f"Provide clearer assessment information for {module_name}."
-        ],
-    }
+            accepted_images,
+            document_text,
+        )
+        current_model = context_model
+        async with request_slots:
+            stage_started_at = time.perf_counter()
+            stage_in_progress = True
+            context_result = await _run_model_stage(
+                stage="context",
+                prompt=context_prompt,
+                images=accepted_images,
+                api_key=api_key,
+                model=context_model,
+                system_prompt=CONTEXT_SYSTEM_PROMPT,
+                tool_name="submit_assessment_evidence",
+                tool_description="Submit explicit assessment evidence from the sources.",
+                schema=_context_schema(),
+                max_tokens=4_096,
+                reasoning_effort="none",
+                api_caller=api_caller,
+            )
+        stage_in_progress = False
+        stage_finished_at = time.perf_counter()
+        stage_duration_ms = round(
+            (stage_finished_at - stage_started_at) * 1000,
+            2,
+        )
+        model_runs.append(
+            {
+                "module_name": module_name,
+                "stage": current_stage,
+                "model": current_model,
+                "status": "completed",
+                "duration_ms": stage_duration_ms,
+            }
+        )
+        LOGGER.info(
+            "AI stage completed module=%s stage=%s model=%s duration_ms=%s",
+            module_name,
+            current_stage,
+            current_model,
+            stage_duration_ms,
+        )
+        models_used.append(context_model)
+
+        current_stage = "reasoning"
+        reasoning_model = os.getenv("AI_REASONING_MODEL", REASONING_MODEL)
+        reasoning_prompt = _format_reasoning_prompt(
+            module,
+            context_result,
+            repeating_schedule_data,
+        )
+        current_model = reasoning_model
+        async with request_slots:
+            stage_started_at = time.perf_counter()
+            stage_in_progress = True
+            reasoning_result = await _run_model_stage(
+                stage="reasoning",
+                prompt=reasoning_prompt,
+                images=[],
+                api_key=api_key,
+                model=reasoning_model,
+                system_prompt=REASONING_SYSTEM_PROMPT,
+                tool_name="submit_module_facts",
+                tool_description="Submit the reconciled module assessment schedule.",
+                schema=_pacing_schema(),
+                max_tokens=4_096,
+                reasoning_effort="none",
+                api_caller=api_caller,
+            )
+        stage_in_progress = False
+        stage_finished_at = time.perf_counter()
+        stage_duration_ms = round(
+            (stage_finished_at - stage_started_at) * 1000,
+            2,
+        )
+        model_runs.append(
+            {
+                "module_name": module_name,
+                "stage": current_stage,
+                "model": current_model,
+                "status": "completed",
+                "duration_ms": stage_duration_ms,
+            }
+        )
+        LOGGER.info(
+            "AI stage completed module=%s stage=%s model=%s duration_ms=%s",
+            module_name,
+            current_stage,
+            current_model,
+            stage_duration_ms,
+        )
+        models_used.append(reasoning_model)
+
+        normalized_module = _normalize_module_result(reasoning_result, module)
+        module_comments = normalized_module["comments"]
+        combined_comments = module_comments + document_comments
+        normalized_module["comments"] = _unique_text(combined_comments)
+        normalized_module["pipeline_context"] = {
+            "precheck": precheck_result,
+            "evidence": context_result,
+        }
+        return {
+            "module": normalized_module,
+            "failure": None,
+            "models_used": models_used,
+            "model_runs": model_runs,
+        }
+    except (ConnectionError, OSError, TypeError, ValueError, KeyError) as error:
+        safe_error = _safe_error(error)
+        failure_type = "model_error"
+        failure_message = "The AI service could not process this module."
+        lower_error = safe_error.lower()
+        if "timed out" in lower_error:
+            failure_type = "model_timeout"
+            failure_message = f"{current_model} timed out during {current_stage}."
+        elif "http 429" in lower_error or "rate limit" in lower_error:
+            failure_type = "rate_limit"
+            failure_message = "The AI service rate limit was reached."
+        elif "quota" in lower_error or "balance" in lower_error or "credit" in lower_error:
+            failure_type = "quota"
+            failure_message = "The AI service quota or credit is unavailable."
+        elif "valid json" in lower_error or "model response" in lower_error:
+            failure_type = "invalid_model_response"
+            failure_message = "The AI model returned an invalid response."
+        if stage_in_progress and stage_started_at is not None:
+            stage_finished_at = time.perf_counter()
+            stage_duration_ms = round(
+                (stage_finished_at - stage_started_at) * 1000,
+                2,
+            )
+            model_runs.append(
+                {
+                    "module_name": module_name,
+                    "stage": current_stage,
+                    "model": current_model,
+                    "status": "failed",
+                    "duration_ms": stage_duration_ms,
+                }
+            )
+        LOGGER.warning(
+            "AI stage failed module=%s stage=%s model=%s error=%s",
+            module_name,
+            current_stage,
+            current_model,
+            safe_error,
+        )
+        return {
+            "module": {
+                "module_name": module_name,
+                "credit_units": module.get("credit_units"),
+                "assessments": [],
+                "comments": [],
+            },
+            "failure": {
+                "module_name": module_name,
+                "stage": current_stage,
+                "category": "system_failure",
+                "failure_type": failure_type,
+                "message": failure_message,
+            },
+            "models_used": models_used,
+            "model_runs": model_runs,
+        }
 
 
-def _build_pacing_prompt(module, repeating_schedule_data):
+async def _run_model_stage(
+    *,
+    stage,
+    prompt,
+    images,
+    api_key,
+    model,
+    system_prompt,
+    tool_name,
+    tool_description,
+    schema,
+    max_tokens,
+    reasoning_effort,
+    api_caller,
+):
+    if api_caller is not None:
+        reply = await _invoke_caller(
+            api_caller,
+            stage=stage,
+            prompt=prompt,
+            images=images,
+            model=model,
+            schema=schema,
+            reasoning_effort=reasoning_effort,
+        )
+    else:
+        reply = await _call_model(
+            prompt=prompt,
+            images=images,
+            api_key=api_key,
+            model=model,
+            system_prompt=system_prompt,
+            tool_name=tool_name,
+            tool_description=tool_description,
+            schema=schema,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+
+    parsed_reply = _parse_model_reply(
+        reply,
+        tool_name=tool_name,
+    )
+    return parsed_reply
+
+
+def _format_precheck_prompt(module, images):
+    source_lines = []
+    for image in images:
+        source_id = image["source_id"]
+        image_path = image["path"]
+        file_name = Path(image_path).name
+        source_lines.append(f"{source_id}: {file_name}")
+
+    sources = "\n".join(source_lines)
+    return (
+        f"Expected module: {module['module_name']}\n"
+        "Classify each image as relevant, irrelevant, or uncertain. An image is "
+        "relevant when it contains readable assessment names, weights, deadlines, "
+        "weeks, recurrence, or another fact needed for a module schedule.\n"
+        f"Sources:\n{sources}"
+    )
+
+
+def _accepted_images(images, precheck_result):
+    image_results = precheck_result.get("images")
+    if not isinstance(image_results, list):
+        raise ValueError("The precheck result did not contain an images list.")
+    if len(image_results) != len(images):
+        raise ValueError("The precheck did not classify every supplied image.")
+
+    images_by_source_id = {}
+    for image in images:
+        source_id = image["source_id"]
+        images_by_source_id[source_id] = image
+
+    accepted_images = []
+    seen_source_ids = set()
+    for image_result in image_results:
+        if not isinstance(image_result, dict):
+            raise ValueError("The precheck returned an invalid image result.")
+
+        source_id = image_result.get("source_id")
+        status = image_result.get("status")
+        if status not in {"relevant", "irrelevant", "uncertain"}:
+            raise ValueError("The precheck returned an invalid relevance status.")
+        if source_id not in images_by_source_id:
+            raise ValueError("The precheck returned an invalid source ID.")
+        if source_id in seen_source_ids:
+            raise ValueError("The precheck returned a duplicate source ID.")
+        seen_source_ids.add(source_id)
+
+        if status == "irrelevant":
+            continue
+
+        accepted_image = images_by_source_id[source_id]
+        accepted_images.append(accepted_image)
+
+    return accepted_images
+
+
+def _read_module_documents(documents):
     document_parts = []
     comments = []
     remaining_chars = MAX_DOCUMENT_CHARS
-    for file_path in module.get("files", []):
+    for document in documents:
+        file_path = document["path"]
+        document_type = document["document_type"]
         path = Path(file_path)
-        if path.suffix.lower() in SUPPORTED_IMAGE_TYPES:
-            continue
         try:
-            text = _read_document_text(path)
+            text = _read_document_text(path, document_type)
             if not text.strip():
                 comments.append(f"{path.name} did not contain readable text.")
                 continue
@@ -313,138 +624,107 @@ def _build_pacing_prompt(module, repeating_schedule_data):
                 document_parts.append(f"--- {path.name} ---\n{excerpt}")
                 remaining_chars -= len(excerpt)
         except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as error:
+            safe_error = _safe_error(error)
             LOGGER.warning(
                 "Could not read uploaded document %s: %s",
                 path.name,
-                _safe_error(error),
+                safe_error,
             )
             comments.append(f"{path.name} could not be read as assessment evidence.")
 
     document_text = "\n".join(document_parts)
-    prompt = _format_pacing_prompt(
-        module,
-        document_text,
-        repeating_schedule_data,
+    return document_text, comments
+
+
+def _format_context_prompt(module, images, document_text):
+    image_sources = []
+    for image in images:
+        source_id = image["source_id"]
+        image_path = image["path"]
+        file_name = Path(image_path).name
+        image_sources.append(f"{source_id}: {file_name}")
+
+    image_source_text = "\n".join(image_sources)
+    return (
+        f"Module: {module['module_name']}\n"
+        f"Credit units: {module.get('credit_units')}\n"
+        f"User context: {module.get('additional_context') or 'None'}\n"
+        "Extract only explicit assessment evidence. Give each image evidence item "
+        "the source ID listed below. Preserve contradictions as "
+        "separate evidence items. Do not produce a final schedule.\n"
+        f"Image sources:\n{image_source_text or 'None'}\n"
+        f"Document text:\n{document_text or 'None'}"
     )
-    return prompt, comments
 
 
-def _read_document_text(path):
-    suffix = path.suffix.lower()
-    if suffix in {".txt", ".md", ".csv", ".json"}:
+def _format_reasoning_prompt(module, context_result, repeating_schedule_data):
+    evidence_text = json.dumps(context_result, separators=(",", ":"))
+    retry_text = "None"
+    if repeating_schedule_data is not None:
+        retry_text = json.dumps(repeating_schedule_data, separators=(",", ":"))
+
+    return (
+        f"Module: {module['module_name']}\n"
+        f"Credit units: {module.get('credit_units')}\n"
+        f"User context: {module.get('additional_context') or 'None'}\n"
+        f"Extracted evidence: {evidence_text}\n"
+        f"Existing retry schedule: {retry_text}\n"
+        "Reconcile duplicates and conflicts, interpret recurrence and shared weights, "
+        "and return the most defensible schedule. Use null rather than guessing."
+    )
+
+
+def _read_document_text(path, document_type):
+    if document_type == "text":
         return path.read_text(encoding="utf-8", errors="replace")
-    if suffix == ".pdf":
+    if document_type == "pdf":
         try:
             from pypdf import PdfReader
         except ImportError as error:
             raise RuntimeError("PDF support is unavailable") from error
         return "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
-    if suffix == ".docx":
+    if document_type == "docx":
         with zipfile.ZipFile(path) as archive:
-            root = ElementTree.fromstring(archive.read("word/document.xml"))
+            document_xml = archive.read("word/document.xml")
+            root = ElementTree.fromstring(document_xml)
         return "\n".join(text for text in root.itertext() if text.strip())
     raise ValueError("Unsupported document type")
 
 
-def _format_pacing_prompt(module, document_text, repeating_schedule_data):
-    schedule_context = "None"
-    if repeating_schedule_data is not None:
-        schedule_context = json.dumps(repeating_schedule_data, separators=(",", ":"))
-
-    return (
-        "Extract every graded assessment from this module. Recognise quizzes, "
-        "assignments, projects, reports, presentations, labs, practicals, "
-        "midterms, final exams, and participation. Exclude make-up/replacement "
-        "tests, optional activities, practice, and formative work unless clearly "
-        "graded for this student. Keep items sharing one weight together. Split "
-        "only independently weighted items. For recurring work, give exact weeks "
-        "when known. For multi-week work, give start and end weeks. A weight of "
-        "30 means 30%. Preserve supplied credits and use ISO YYYY-MM-DD dates. "
-        "Treat existing schedule data as retry context: keep supported facts, "
-        "correct them when the current evidence is clearer, and do not duplicate "
-        "assessments.\n\n"
-        f"Module: {module['module_name']}\n"
-        f"Credit units: {module.get('credit_units')}\n"
-        f"Additional context: {module.get('additional_context') or 'None'}\n"
-        f"Existing repeating schedule data: {schedule_context}\n"
-        f"Document text:\n{document_text or 'None; inspect supplied images.'}"
-    )
-
-
-# Shared model request and response contract
-
-
-async def _call_pacing_model(
-    prompt, image_paths, api_key, model, structured_output=False
-):
-    return await _call_model(
-        prompt=prompt,
-        image_paths=image_paths,
-        api_key=api_key,
-        model=model,
-        structured_output=structured_output,
-        system_prompt=PACING_SYSTEM_PROMPT,
-        tool_name="submit_module_facts",
-        tool_description="Submit extracted module assessment facts.",
-        schema_name="module_pacing_facts",
-        schema=_pacing_schema(),
-        max_tokens=2_500,
-    )
-
-
-async def _call_legacy_model(
-    prompt, image_paths, api_key, model, structured_output=False
-):
-    return await _call_model(
-        prompt=prompt,
-        image_paths=image_paths,
-        api_key=api_key,
-        model=model,
-        structured_output=structured_output,
-        system_prompt=LEGACY_SYSTEM_PROMPT,
-        tool_name="submit_assessments",
-        tool_description="Submit usable assessments and concise evidence comments.",
-        schema_name="module_assessments",
-        schema=_legacy_schema(),
-        max_tokens=4_000 if structured_output else 2_000,
-    )
+# Model request and response contract
 
 
 async def _call_model(
     *,
     prompt,
-    image_paths,
+    images,
     api_key,
     model,
-    structured_output,
     system_prompt,
     tool_name,
     tool_description,
-    schema_name,
     schema,
     max_tokens,
+    reasoning_effort,
 ):
+    user_content = _build_user_content(prompt, images)
+    tool_choice = "auto"
+    if reasoning_effort == "none":
+        tool_choice = {
+            "type": "function",
+            "function": {"name": tool_name},
+        }
+
     request = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": _build_user_content(prompt, image_paths)},
+            {"role": "user", "content": user_content},
         ],
         "temperature": 0,
         "max_tokens": max_tokens,
-        "extra_body": {"enable_thinking": False},
-    }
-    if structured_output:
-        request["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "strict": True,
-                "schema": schema,
-            },
-        }
-    else:
-        request["tools"] = [
+        "reasoning_effort": reasoning_effort,
+        "tools": [
             {
                 "type": "function",
                 "function": {
@@ -453,18 +733,37 @@ async def _call_model(
                     "parameters": schema,
                 },
             }
-        ]
-        request["tool_choice"] = {
-            "type": "function",
-            "function": {"name": tool_name},
-        }
+        ],
+        "tool_choice": tool_choice,
+    }
+
+    raw_timeout = os.getenv(
+        "AI_MODEL_TIMEOUT_SECONDS",
+        str(DEFAULT_MODEL_TIMEOUT_SECONDS),
+    )
+    try:
+        model_timeout = float(raw_timeout)
+    except ValueError:
+        model_timeout = DEFAULT_MODEL_TIMEOUT_SECONDS
+    if model_timeout <= 0:
+        model_timeout = DEFAULT_MODEL_TIMEOUT_SECONDS
+
+    raw_retries = os.getenv(
+        "AI_MODEL_RETRIES",
+        str(DEFAULT_MODEL_RETRIES),
+    )
+    try:
+        model_retries = int(raw_retries)
+    except ValueError:
+        model_retries = DEFAULT_MODEL_RETRIES
+    model_retries = max(0, min(model_retries, 2))
 
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=os.getenv("DASHSCOPE_BASE_URL", DASHSCOPE_BASE_URL).strip()
         or DASHSCOPE_BASE_URL,
-        timeout=90.0,
-        max_retries=2,
+        timeout=model_timeout,
+        max_retries=model_retries,
     )
     try:
         completion = await client.chat.completions.create(**request)
@@ -481,27 +780,34 @@ async def _call_model(
 
     usage = getattr(completion, "usage", None)
     if usage is not None:
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        total_tokens = getattr(usage, "total_tokens", None)
         LOGGER.info(
             "%s token usage: input=%s output=%s total=%s",
             model,
-            getattr(usage, "prompt_tokens", None),
-            getattr(usage, "completion_tokens", None),
-            getattr(usage, "total_tokens", None),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
         )
     return completion.choices[0].message.model_dump(exclude_none=True)
 
 
-def _build_user_content(prompt, image_paths):
+def _build_user_content(prompt, images):
     content = [{"type": "text", "text": prompt}]
-    for image_path in image_paths:
+    for image in images:
+        image_path = image["path"]
+        media_type = image["media_type"]
         path = Path(image_path)
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        image_bytes = path.read_bytes()
+        encoded_bytes = base64.b64encode(image_bytes)
+        encoded = encoded_bytes.decode("ascii")
         content.append(
             {
                 "type": "image_url",
                 "image_url": {
                     "url": (
-                        f"data:{IMAGE_MEDIA_TYPES[path.suffix.lower()]};base64,"
+                        f"data:{media_type};base64,"
                         f"{encoded}"
                     )
                 },
@@ -510,33 +816,21 @@ def _build_user_content(prompt, image_paths):
     return content
 
 
-def _parse_model_reply(reply, *, tool_name, module_name=None):
-    if isinstance(reply, dict) and "assessments" in reply:
+def _parse_model_reply(reply, *, tool_name):
+    if isinstance(reply, dict) and "tool_calls" not in reply and "content" not in reply:
         return reply
-    if isinstance(reply, dict) and isinstance(reply.get("modules"), list):
-        candidates = [item for item in reply["modules"] if isinstance(item, dict)]
-        selected = next(
-            (
-                item
-                for item in candidates
-                if _module_name(item) == _clean_name(module_name)
-            ),
-            candidates[0] if candidates else None,
-        )
-        if selected is not None:
-            return {
-                **selected,
-                "global_comments": reply.get("global_comments", []),
-                "user_checklist": reply.get("user_checklist", []),
-            }
     if not isinstance(reply, dict):
-        return _parse_json_object(str(reply))
-    for tool_call in _list_or_empty(reply.get("tool_calls")):
+        reply_text = str(reply)
+        return _parse_json_object(reply_text)
+    raw_tool_calls = reply.get("tool_calls")
+    tool_calls = _list_or_empty(raw_tool_calls)
+    for tool_call in tool_calls:
         function = (
             tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
         )
         if function.get("name") == tool_name:
-            return _parse_json_object(function.get("arguments", ""))
+            arguments = function.get("arguments", "")
+            return _parse_json_object(arguments)
     content = reply.get("content", "")
     if isinstance(content, list):
         content = "".join(
@@ -548,17 +842,13 @@ def _parse_model_reply(reply, *, tool_name, module_name=None):
 def _parse_json_object(text):
     if not isinstance(text, str):
         raise ValueError("The model response was not text.")
-    decoder = json.JSONDecoder()
-    for index, character in enumerate(text):
-        if character != "{":
-            continue
-        try:
-            value, _end = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-    raise ValueError("The model did not return usable structured data.")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError("The model did not return valid JSON.") from error
+    if isinstance(value, dict):
+        return value
+    raise ValueError("The model JSON response was not an object.")
 
 
 def _strict_object(properties, *, required=None):
@@ -575,6 +865,45 @@ def _string_list(max_items=None):
     if max_items is not None:
         schema["maxItems"] = max_items
     return schema
+
+
+def _precheck_schema():
+    image_result = _strict_object(
+        {
+            "source_id": {"type": "string"},
+            "status": {
+                "type": "string",
+                "enum": ["relevant", "irrelevant", "uncertain"],
+            },
+            "comment": {"type": "string"},
+        }
+    )
+    return _strict_object(
+        {
+            "images": {"type": "array", "items": image_result},
+            "comments": _string_list(3),
+        }
+    )
+
+
+def _context_schema():
+    evidence_item = _strict_object(
+        {
+            "source_id": {"type": "string"},
+            "evidence_text": {"type": "string"},
+            "assessment_hint": {"type": ["string", "null"]},
+            "weightage_seen": {"type": ["number", "null"]},
+            "timing_seen": {"type": ["string", "null"]},
+            "recurrence_seen": {"type": ["string", "null"]},
+        }
+    )
+    return _strict_object(
+        {
+            "evidence": {"type": "array", "items": evidence_item},
+            "unclear_evidence": _string_list(5),
+            "comments": _string_list(3),
+        }
+    )
 
 
 def _pacing_schema():
@@ -595,6 +924,10 @@ def _pacing_schema():
         {
             "name": {"type": "string"},
             "type": {"type": "string"},
+            "classification": {
+                "type": "string",
+                "enum": ["graded", "aggregate", "bonus", "ungraded", "uncertain"],
+            },
             "weightage_percent": nullable_number,
             "weightage_scope": {
                 "type": "string",
@@ -615,34 +948,13 @@ def _pacing_schema():
     )
     return _strict_object(
         {
-            "module_name": {"type": "string"},
-            "credit_units": nullable_number,
             "assessments": {"type": "array", "items": assessment},
             "comments": _string_list(3),
-            "global_comments": _string_list(3),
-            "user_checklist": _string_list(3),
         }
     )
 
 
-def _legacy_schema():
-    assessment = _strict_object(
-        {
-            "assessment_type": {"type": "string"},
-            "deadline": {"type": ["string", "null"]},
-            "weightage": {"type": ["number", "null"]},
-            "issues": _string_list(),
-        }
-    )
-    return _strict_object(
-        {
-            "assessments": {"type": "array", "items": assessment},
-            "comments": _string_list(),
-        }
-    )
-
-
-# Active normalization
+# AI result normalization
 
 
 def _normalize_module_result(reply, supplied_module):
@@ -650,253 +962,130 @@ def _normalize_module_result(reply, supplied_module):
         raise ValueError("The model result was not an object.")
 
     raw_assessments = reply.get("assessments", [])
-    comments = _text_list(reply.get("comments"))
+    raw_comments = reply.get("comments")
+    comments = _text_list(raw_comments)
     if not isinstance(raw_assessments, list):
-        comments.append("The model result did not contain a readable assessment list.")
-        raw_assessments = []
+        raise ValueError("The model result did not contain an assessment list.")
 
     assessments = []
     for index, raw in enumerate(raw_assessments, start=1):
         if not isinstance(raw, dict):
-            comments.append(f"Assessment {index} could not be interpreted.")
-            continue
-        name = str(raw.get("name") or raw.get("assessment_type") or "").strip()
+            raise ValueError(f"Assessment {index} was not an object.")
+        name = str(raw.get("name") or "").strip()
         if not name:
-            comments.append(f"Assessment {index} has no readable title.")
-            continue
+            raise ValueError(f"Assessment {index} has no title.")
 
-        weight = _number_or_none(
-            raw.get("weightage_percent", raw.get("weightage"))
-        )
-        item_comments = _text_list(raw.get("comments"))
-        missing = _text_list(raw.get("missing_information"))[:1]
+        classification = raw.get("classification")
+        allowed_classifications = {
+            "graded",
+            "aggregate",
+            "bonus",
+            "ungraded",
+            "uncertain",
+        }
+        if classification not in allowed_classifications:
+            raise ValueError(f"Assessment {index} has an invalid classification.")
+
+        raw_weight = raw.get("weightage_percent")
+        weight = _number_or_none(raw_weight)
+        raw_item_comments = raw.get("comments")
+        item_comments = _text_list(raw_item_comments)
+        raw_missing_information = raw.get("missing_information")
+        missing_information = _text_list(raw_missing_information)
+        missing = _unique_text(missing_information)
         if weight is not None and not 0 <= weight <= 100:
-            item_comments.append(
-                f"The reported weightage for {name} is outside 0–100%."
-            )
-            missing = ["Valid assessment weightage"]
-            weight = None
+            raise ValueError(f"Assessment {index} has an invalid weightage.")
 
-        due_week = _week_or_none(raw.get("due_week"))
-        if due_week is None:
-            due_week = _week_from_deadline(raw.get("deadline"))
+        raw_due_week = raw.get("due_week")
+        due_week = _week_or_none(raw_due_week)
 
-        recurrence = _normalize_recurrence(raw.get("recurrence"))
-        confidence = _number_or_none(raw.get("confidence"))
-        if confidence is not None:
-            confidence = min(max(confidence, 0), 1)
+        raw_recurrence = raw.get("recurrence")
+        recurrence = _normalize_recurrence(raw_recurrence)
+        recurring = raw.get("recurring")
+        if not isinstance(recurring, bool):
+            raise ValueError(f"Assessment {index} has invalid recurrence status.")
+
+        spans_multiple_weeks = raw.get("spans_multiple_weeks")
+        if not isinstance(spans_multiple_weeks, bool):
+            raise ValueError(f"Assessment {index} has invalid duration status.")
+
+        raw_confidence = raw.get("confidence")
+        confidence = _number_or_none(raw_confidence)
+        if confidence is not None and not 0 <= confidence <= 1:
+            raise ValueError(f"Assessment {index} has invalid confidence.")
         raw_scope = str(raw.get("weightage_scope") or "").strip().lower()
+        allowed_scopes = {"total", "per_occurrence", "unknown"}
+        if raw_scope not in allowed_scopes:
+            raise ValueError(f"Assessment {index} has an invalid weightage scope.")
 
-        assessments.append(
-            {
-                "name": name,
-                "type": str(raw.get("type") or "assessment").strip().lower(),
-                "weightage_percent": weight,
-                "weightage_scope": (
-                    raw_scope
-                    if raw_scope in {"total", "per_occurrence"}
-                    else "total"
-                ),
-                "due_date": str(raw.get("due_date") or "").strip() or None,
-                "due_week": due_week,
-                "recurring": bool(raw.get("recurring", False)),
-                "recurrence": recurrence,
-                "spans_multiple_weeks": bool(raw.get("spans_multiple_weeks", False)),
-                "start_week": _week_or_none(raw.get("start_week")),
-                "end_week": _week_or_none(raw.get("end_week")),
-                "confidence": confidence,
-                "comments": _unique_text(item_comments),
-                "missing_information": _unique_text(missing),
-                "assumptions": _unique_text(_text_list(raw.get("assumptions")))[:1],
-            }
-        )
+        raw_start_week = raw.get("start_week")
+        start_week = _week_or_none(raw_start_week)
+        raw_end_week = raw.get("end_week")
+        end_week = _week_or_none(raw_end_week)
+        raw_assumptions = raw.get("assumptions")
+        assumptions = _text_list(raw_assumptions)
+        unique_assumptions = _unique_text(assumptions)
+        assessment_type = str(raw.get("type") or "assessment")
+        assessment_type = assessment_type.strip().lower()
+        raw_due_date = raw.get("due_date")
+        due_date = str(raw_due_date or "").strip() or None
 
-    _convert_fractional_weights(assessments, "weightage_percent")
-    supplied_credits = supplied_module.get("credit_units")
-    credits = (
-        supplied_credits
-        if supplied_credits is not None
-        else _number_or_none(reply.get("credit_units"))
-    )
+        assessment = {
+            "name": name,
+            "type": assessment_type,
+            "classification": classification,
+            "weightage_percent": weight,
+            "weightage_scope": raw_scope,
+            "due_date": due_date,
+            "due_week": due_week,
+            "recurring": recurring,
+            "recurrence": recurrence,
+            "spans_multiple_weeks": spans_multiple_weeks,
+            "start_week": start_week,
+            "end_week": end_week,
+            "confidence": confidence,
+            "comments": _unique_text(item_comments),
+            "missing_information": missing,
+            "assumptions": unique_assumptions[:1],
+        }
+        assessments.append(assessment)
+
     return {
-        "module": {
-            "module_name": supplied_module["module_name"],
-            "credit_units": credits,
-            "assessments": assessments,
-            "comments": _unique_text(comments),
-        },
-        "global_comments": _text_list(reply.get("global_comments"))[:3],
-        "user_checklist": _text_list(reply.get("user_checklist"))[:3],
+        "module_name": supplied_module["module_name"],
+        "credit_units": supplied_module.get("credit_units"),
+        "assessments": assessments,
+        "comments": _unique_text(comments),
     }
 
 
 def _normalize_recurrence(value):
-    if not isinstance(value, dict):
+    if value is None:
         return None
+    if not isinstance(value, dict):
+        raise ValueError("Assessment recurrence was not an object or null.")
+    raw_weeks = value.get("weeks")
+    if not isinstance(raw_weeks, list):
+        raise ValueError("Assessment recurrence weeks were not a list.")
+
+    weeks = []
+    for raw_week in raw_weeks:
+        week = _week_or_none(raw_week)
+        weeks.append(week)
+
+    raw_start_week = value.get("start_week")
+    start_week = _week_or_none(raw_start_week)
+    raw_end_week = value.get("end_week")
+    end_week = _week_or_none(raw_end_week)
+    raw_interval = value.get("every_n_weeks")
+    every_n_weeks = _week_or_none(raw_interval)
+
     return {
         "frequency": str(value.get("frequency") or "").strip() or None,
-        "weeks": [
-            week
-            for week in (
-                _week_or_none(item)
-                for item in _list_or_empty(value.get("weeks"))
-            )
-            if week is not None
-        ],
-        "start_week": _week_or_none(value.get("start_week")),
-        "end_week": _week_or_none(value.get("end_week")),
-        "every_n_weeks": _week_or_none(value.get("every_n_weeks")),
+        "weeks": weeks,
+        "start_week": start_week,
+        "end_week": end_week,
+        "every_n_weeks": every_n_weeks,
     }
-
-
-# Legacy one-module compatibility API
-
-
-def extract_assessments(input_data, api_caller=None):
-    """Synchronous entry point for the original one-module request path."""
-    _require_no_running_loop("extract_assessments", "extract_assessments_async")
-    return asyncio.run(extract_assessments_async(input_data, api_caller))
-
-
-async def extract_assessments_async(input_data, api_caller=None):
-    """Return assessments using the original one-module response contract."""
-    module = _clean_name(input_data.get("module"))
-    image_paths = input_data.get("image_paths", [])
-    LOGGER.info(
-        "Starting legacy assessment extraction for %s with %d image(s)",
-        module,
-        len(image_paths),
-    )
-    api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
-    if api_caller is None and not api_key:
-        return {
-            "assessments": [],
-            "comments": ["The AI service is not configured, so no schedule was created."],
-        }
-
-    caller = api_caller or _call_legacy_model
-    best_result = None
-    for attempt, model in enumerate(_model_route(), start=1):
-        try:
-            prompt = _format_legacy_prompt(input_data)
-            if best_result:
-                recovered_weight = sum(
-                    item["weightage"] or 0 for item in best_result["assessments"]
-                )
-                prompt += (
-                    f"\nA previous reading found {len(best_result['assessments'])} "
-                    f"component(s) totalling {recovered_weight:g}%. Re-scan the "
-                    "evidence for anything it missed."
-                )
-            reply = await _invoke_caller(
-                caller,
-                prompt=prompt,
-                image_paths=image_paths,
-                api_key=api_key if api_caller is None else "",
-                model=model,
-                structured_output=attempt > 1,
-            )
-            result = _normalize_legacy_reply(
-                _parse_model_reply(reply, tool_name="submit_assessments")
-            )
-            if result["assessments"] or result["comments"]:
-                result["model_used"] = model
-                if best_result is None or _result_score(
-                    result["assessments"],
-                    weight_key="weightage",
-                    timing_key="deadline",
-                ) > _result_score(
-                    best_result["assessments"],
-                    weight_key="weightage",
-                    timing_key="deadline",
-                ):
-                    best_result = result
-                if _has_complete_weight_set(result["assessments"]):
-                    return result
-        except (ConnectionError, OSError, TypeError, ValueError, KeyError) as error:
-            LOGGER.warning(
-                "Legacy AI model %s failed on attempt %d: %s",
-                model,
-                attempt,
-                _safe_error(error),
-            )
-
-    if best_result:
-        return best_result
-    return {
-        "assessments": [],
-        "comments": [
-            "The AI services did not return a usable reading of the evidence. "
-            "No timetable blocks were created."
-        ],
-    }
-
-
-def _format_legacy_prompt(input_data):
-    context = str(input_data.get("prompt", "")).strip()
-    return (
-        f"Extract every graded component for module {_clean_name(input_data['module'])} "
-        "from all evidence. Copy source names, including unfamiliar assessment "
-        "formats. Keep repeated activities together when they share one collective "
-        "weight; split only independently weighted components. Scan all evidence "
-        "before responding. Use deadline Week N only for one exact stated week; "
-        "otherwise use null. Never guess or divide a shared weight. A weight of "
-        "15% must be returned as 15, not 0.15. Return all reliable components even "
-        "when some facts are unclear. Keep comments and actionable evidence requests "
-        "short, and do not repeat confirmed facts. "
-        f"Additional context: {context or 'None'}"
-    )
-
-
-def _normalize_legacy_reply(reply):
-    if not isinstance(reply, dict) or not isinstance(reply.get("assessments"), list):
-        raise ValueError("The model result did not contain an assessments list.")
-
-    comments = _text_list(reply.get("comments", reply.get("errors", [])))
-    assessments = []
-    for index, item in enumerate(reply["assessments"], start=1):
-        if not isinstance(item, dict):
-            comments.append(f"Assessment {index} could not be read clearly.")
-            continue
-        name = str(item.get("assessment_type") or item.get("name") or "").strip()
-        if not name:
-            comments.append(f"Assessment {index} had no readable name.")
-            continue
-
-        issues = _issue_text(item.get("issues"))
-        deadline = item.get("deadline")
-        due_week = _week_from_deadline(deadline, maximum=52)
-        if due_week is not None:
-            deadline = f"Week {due_week}"
-        elif deadline is not None:
-            issues.append(
-                f"Add deadline evidence in Week N format for {name}; found: {deadline}."
-            )
-            deadline = None
-
-        weight = _number_or_none(item.get("weightage"))
-        if weight is None:
-            if item.get("weightage") not in (None, ""):
-                issues.append(f"Add one percentage weight for {name}.")
-        elif not 0 <= weight <= 100:
-            issues.append(f"Add a weight from 0% to 100% for {name}.")
-            weight = None
-        if deadline is None and not _contains_word(issues, "deadline"):
-            issues.append("Add evidence showing one exact deadline as Week N.")
-        if weight is None and not _contains_word(issues, "weight"):
-            issues.append("Add evidence showing this assessment's percentage weight.")
-
-        assessments.append(
-            {
-                "assessment_type": name,
-                "deadline": deadline,
-                "weightage": weight,
-                "issues": _unique_text(issues),
-            }
-        )
-
-    _convert_fractional_weights(assessments, "weightage")
-    return {"assessments": assessments, "comments": _unique_text(comments)}
 
 
 # Small shared helpers
@@ -918,119 +1107,46 @@ def _require_no_running_loop(sync_name, async_name):
     )
 
 
-def _empty_module_result(module, comment):
-    return {
-        "module_name": module["module_name"],
-        "credit_units": module.get("credit_units"),
-        "assessments": [],
-        "comments": [comment],
-    }
-
-
-def _model_route():
-    primary = os.getenv("QWEN_MODEL", PRIMARY_MODEL).strip() or PRIMARY_MODEL
-    backup = os.getenv("QWEN_BACKUP_MODEL", BACKUP_MODEL).strip() or BACKUP_MODEL
-    return [primary] if primary == backup else [primary, backup]
-
-
-def _result_score(assessments, *, weight_key, timing_key):
-    known_facts = sum(
-        item.get(weight_key) is not None for item in assessments
-    ) + sum(item.get(timing_key) is not None for item in assessments)
-    return len(assessments), known_facts
-
-
-def _convert_fractional_weights(assessments, key):
-    weights = [item[key] for item in assessments if item.get(key) is not None]
-    if len(weights) >= 2 and max(weights) <= 1 and 0.99 <= sum(weights) <= 1.01:
-        for item in assessments:
-            if item.get(key) is not None:
-                item[key] = round(item[key] * 100, 4)
-
-
-def _has_complete_weight_set(assessments):
-    weights = [
-        item["weightage"]
-        for item in assessments
-        if item.get("weightage") is not None
-    ]
-    return bool(weights) and 99.5 <= sum(weights) <= 100.5
-
-
-def _week_from_deadline(value, *, maximum=None):
-    if not isinstance(value, str):
-        return None
-    match = re.fullmatch(r"\s*week\s*(\d{1,2})\s*", value, re.IGNORECASE)
-    if not match:
-        return None
-    week = int(match.group(1))
-    return week if maximum is None or 1 <= week <= maximum else None
-
-
-def _issue_text(value):
-    issues = []
-    for item in _list_or_empty(value):
-        if isinstance(item, str) and item.strip():
-            issues.append(item.strip())
-        elif isinstance(item, dict):
-            text = item.get("feedback") or item.get("message")
-            if isinstance(text, str) and text.strip():
-                issues.append(text.strip())
-    return issues
-
-
-def _contains_word(items, word):
-    return any(word in item.lower() for item in items)
-
-
-def _modules_by_name(modules):
-    return {
-        name: {**item, "module_name": name}
-        for item in modules
-        if isinstance(item, dict) and (name := _module_name(item))
-    }
-
-
-def _module_name(module):
-    return _clean_name(module.get("module_name")) if isinstance(module, dict) else ""
-
-
-def _clean_name(value):
-    return str(value or "").strip().upper()
-
-
 def _list_or_empty(value):
     return value if isinstance(value, list) else []
 
 
 def _text_list(value):
-    return [
-        str(item).strip()
-        for item in _list_or_empty(value)
-        if str(item).strip()
-    ]
+    if not isinstance(value, list):
+        raise ValueError("Expected a list of text values.")
+    text_items = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("Expected every list item to be text.")
+        cleaned_item = item.strip()
+        if cleaned_item:
+            text_items.append(cleaned_item)
+    return text_items
 
 
 def _unique_text(items):
-    return list(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
+    unique_items = []
+    for item in items:
+        cleaned_item = str(item).strip()
+        if cleaned_item and cleaned_item not in unique_items:
+            unique_items.append(cleaned_item)
+    return unique_items
 
 
 def _number_or_none(value):
-    if isinstance(value, bool) or value in (None, ""):
+    if value is None:
         return None
-    try:
-        return float(str(value).strip().rstrip("%"))
-    except (TypeError, ValueError):
-        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("Expected a number or null.")
+    return float(value)
 
 
 def _week_or_none(value):
-    if isinstance(value, bool) or value in (None, ""):
+    if value is None:
         return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("Expected an integer week or null.")
+    return value
 
 
 def _safe_error(error):

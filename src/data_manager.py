@@ -35,26 +35,32 @@ def save_plan(plan):
     return result is not _DATABASE_FAILURE
 
 
-def save(input_data, ai_result, pacing_result):
-    """Store the latest normalized input, AI output, and final pacing result."""
+def save(input_data, ai_result, logic_result):
+    """Store the normalized input, canonical AI data, and weighted module data."""
+    safe_modules = []
+    for module in input_data.get("modules", []):
+        safe_files = []
+        for image in module.get("images", []):
+            safe_files.append({"name": os.path.basename(image["path"])})
+        for document in module.get("documents", []):
+            safe_files.append({"name": os.path.basename(document["path"])})
+
+        safe_module = {
+            "module_name": module.get("module_name"),
+            "credit_units": module.get("credit_units"),
+            "additional_context": module.get("additional_context", ""),
+            "files": safe_files,
+        }
+        safe_modules.append(safe_module)
+
     safe_input = {
-        "modules": [
-            {
-                "module_name": module.get("module_name"),
-                "credit_units": module.get("credit_units"),
-                "additional_context": module.get("additional_context", ""),
-                "files": [
-                    {"name": os.path.basename(path)}
-                    for path in module.get("files", [])
-                ],
-            }
-            for module in input_data.get("modules", [])
-        ]
+        "calendar": input_data.get("calendar", {"recess_weeks": []}),
+        "modules": safe_modules,
     }
     record = {
         "input_data": safe_input,
         "ai_result": ai_result,
-        "pacing_result": pacing_result,
+        "logic_result": logic_result,
     }
     return save_plan(record)
 
@@ -68,9 +74,10 @@ def load_plan():
     if stored_plan is _DATABASE_FAILURE or stored_plan is None:
         return _empty_plan()
     record = json.loads(stored_plan) if isinstance(stored_plan, str) else stored_plan
-    if isinstance(record, dict) and isinstance(record.get("pacing_result"), dict):
-        return record["pacing_result"]
-    return record
+    if isinstance(record, dict) and isinstance(record.get("logic_result"), dict):
+        return record["logic_result"]
+    LOGGER.error("Stored plan does not contain the current logic_result schema")
+    return _empty_plan()
 
 
 def _run_database_operation(operation, *args, missing_error=None, failure_error=None):
@@ -118,20 +125,8 @@ def _fetch_plan(connection):
 
 
 def _empty_plan():
-    """Return an empty pacing dashboard."""
-    return {
-        "trimester_context": {},
-        "current_week": None,
-        "relative_assessment_ranking": [],
-        "module_weight_coverage": [],
-        "timeline": [],
-        "pressure_by_week": [],
-        "overlaps": [],
-        "clusters": [],
-        "overall_pacing": {},
-        "comments": [],
-        "user_checklist": [],
-    }
+    """Return an empty module result."""
+    return {"modules": []}
 
 
 def _connect(database_url):
