@@ -14,7 +14,7 @@ def main(argv=None):
     errors.extend(io_errors)
 
     # Future managers receive payload and append their errors here.
-    return payload, errors
+    print(payload, errors)
 
 
 if __name__ == "__main__":
