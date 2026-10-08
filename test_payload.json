@@ -1,0 +1,25 @@
+{
+  "module_count": 4,
+  "modules": [
+    {
+      "module_title": "INF1102",
+      "credit": 4,
+      "file_path": "test_case/INF1102.png"
+    },
+    {
+      "module_title": "INF1103",
+      "credit": 4,
+      "file_path": "test_case/INF1103.png"
+    },
+    {
+      "module_title": "INF1104",
+      "credit": 4,
+      "file_path": "test_case/INF1104.png"
+    },
+    {
+      "module_title": "UCS1001",
+      "credit": 4,
+      "file_path": "test_case/UCS1001.png"
+    }
+  ]
+}

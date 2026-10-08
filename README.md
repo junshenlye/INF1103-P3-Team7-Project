@@ -6,7 +6,7 @@ the transformed data for the next pipeline stage.
 
 ## Local use
 
-Create an `intake.json` payload:
+The repository includes `test_payload.json`. Its format is:
 
 ```json
 {
@@ -32,7 +32,7 @@ Install the dependencies and pass the payload file to the CLI:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m src.main intake.json
+python -m src.main test_payload.json
 ```
 
 Each successful output module preserves `module_title` and `credit` and replaces
@@ -48,6 +48,17 @@ Payload validation intentionally checks only the basic structure and types:
 `file_path` is a string and points to an available local file. File-type
 validation and AI processing are not part of this integration.
 
+IO failures are kept outside the AI payload as strings beginning with
+`IO Manager error:`. Invalid modules are removed, the remaining modules
+continue, and the collected messages can be passed to the future logging layer.
+
+## Logging
+
+The CLI enables the progress logs produced by the IO Manager. These logs show
+payload loading, validation, temporary file copying, and payload preparation.
+Errors remain in the returned error list for the future pipeline to handle.
+Logs are not stored in files; Docker captures the console stream automatically.
+
 ## Docker
 
 Build the CLI image:
@@ -61,7 +72,7 @@ Run it with a local evidence directory mounted read-only:
 ```sh
 docker run --rm \
   --volume "$PWD:/workspace:ro" \
-  stackplan /workspace/intake.json
+  stackplan /workspace/test_payload.json
 ```
 
 The IO manager creates `/tmp/stackplan-intake` when it copies the first file.

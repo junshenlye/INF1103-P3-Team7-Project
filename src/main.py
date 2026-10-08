@@ -1,18 +1,23 @@
 """Command-line entry point for file intake."""
 
-from .io_manager import parse_cli_arguments, process_cli_input
+import logging
+
+from . import io_manager
 
 
 def main(argv=None):
-    pipeline_errors = []
+    """Pass the payload and collected errors through the manager chain."""
+    errors = []
 
-    cli_input = parse_cli_arguments(argv)
-    ai_payload, io_errors = process_cli_input(cli_input)
-    pipeline_errors.extend(io_errors)
+    cli_input = io_manager.parse_cli_arguments(argv)
+    payload, io_errors = io_manager.process_cli_input(cli_input)
+    errors.extend(io_errors)
 
-    # Future AI, Logic, and Data Manager stages append their errors here.
-    return ai_payload, pipeline_errors
+    # Future managers receive payload and append their errors here.
+    return payload, errors
 
 
 if __name__ == "__main__":
+    # Enable progress logs produced by each manager during CLI execution.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     main()
