@@ -5,16 +5,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd --gid 1000 appuser \
-    && useradd --uid 1000 --gid appuser --create-home appuser
-
 COPY requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir --requirement requirements.txt
 
+RUN useradd --create-home appuser
 COPY --chown=appuser:appuser src ./src
-
 USER appuser
-
-EXPOSE 8000
 
 ENTRYPOINT ["python", "-m", "src.main"]
