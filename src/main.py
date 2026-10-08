@@ -28,7 +28,7 @@ def process_request(
     load_dotenv(PROJECT_ROOT / ".env", override=False)
     request_started_at = time.perf_counter()
 
-    # IO Manager: validate the frontend payload and prepare the AI input.
+    # IO Manager: validate the frontend payload, normalize any real images, and prepare the AI input.
     io_started_at = time.perf_counter()
     module_count = None
     if isinstance(input_data, dict):

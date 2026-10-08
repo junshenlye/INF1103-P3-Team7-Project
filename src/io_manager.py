@@ -1,6 +1,7 @@
-"""Validate and classify frontend data before AI processing."""
-
+import re
 from pathlib import Path
+
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 
 IMAGE_MEDIA_TYPES = {
@@ -19,7 +20,85 @@ DOCUMENT_TYPES = {
     ".docx": "docx",
 }
 
-#Validation Helpers
+
+def is_real_image_file(file_path):
+    #check if file is a real image not an empty file that has .png or .jpg extension
+    """Return True only when a file can be opened and verified as a real image."""
+    if not isinstance(file_path, (str, Path)):
+        return False
+
+    try:
+        path = Path(file_path)
+    except TypeError:
+        return False
+
+    if not path.exists() or not path.is_file():
+        return False
+
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        return False
+    if file_size <= 0 or file_size > 50 * 1024 * 1024:
+        return False
+
+    try:
+        with Image.open(path) as image:
+            image.verify()
+    except (OSError, ValueError, UnidentifiedImageError):
+        return False
+
+    return True
+
+
+def compress_image_lossless(file_path, output_path=None):
+    """Return the path to a losslessly compressed PNG version of the image."""
+    if not isinstance(file_path, (str, Path)):
+        raise ValueError("file_path must be a path string or Path object.")
+
+    source_path = Path(file_path)
+    if not source_path.exists() or not source_path.is_file():
+        raise FileNotFoundError(f"Image file not found: {source_path}")
+    if not is_real_image_file(source_path):
+        raise ValueError(f"The supplied file is not a valid image: {source_path}")
+
+    if output_path is None:
+        output_path = source_path.with_suffix(".compressed.png")
+    destination_path = Path(output_path)
+
+    with Image.open(source_path) as image:
+        image = ImageOps.exif_transpose(image)
+        if image.mode not in {"RGB", "L", "RGBA", "LA", "P"}:
+            image = image.convert("RGB")
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(
+            destination_path,
+            format="PNG",
+            optimize=True,
+            compress_level=9,
+        )
+
+    return str(destination_path)
+
+
+def normalize_image_path(file_path):
+    """Return a losslessly compressed PNG version for valid image files."""
+    if not isinstance(file_path, (str, Path)):
+        return file_path
+
+    path = Path(file_path)
+    if not path.exists() or not path.is_file():
+        return file_path
+    if not is_real_image_file(path):
+        return file_path
+
+    if path.suffix.lower() == ".png" and ".compressed." in path.name:
+        return str(path)
+
+    compressed_path = path.with_name(f"{path.stem}.compressed.png")
+    return compress_image_lossless(path, compressed_path)
+
+
 def validate_module_count(module_count):
     """Check that the frontend declared at least one module."""
     if type(module_count) is not int or module_count < 1:
@@ -55,6 +134,18 @@ def validate_module_objects(data_payload):
     return []
 
 
+def is_valid_module_name(module_name):
+    """Return True for module codes like INF1103, C1241, or BA2021."""
+    if not isinstance(module_name, str):
+        return False
+
+    normalized = module_name.strip()
+    if not normalized:
+        return False
+
+    return bool(re.fullmatch(r"[A-Za-z]{1,3}\d{4}", normalized))
+
+
 def validate_module_names(data_payload):
     """Check that every module has a readable name or code."""
     errors = []
@@ -63,6 +154,12 @@ def validate_module_names(data_payload):
         module_name = module.get("module_name")
         if not isinstance(module_name, str) or not module_name.strip():
             errors.append(f"Module {module_index} requires a module name.")
+            continue
+        if not is_valid_module_name(module_name):
+            errors.append(
+                f"Module {module_index} name must be in the format "
+                "ABC1234 (1 to 3 letters followed by 4 numbers)."
+            )
     return errors
 
 
@@ -116,6 +213,13 @@ def validate_file_types(data_payload):
                 errors.append(
                     f"Module {module_index} contains unsupported file type "
                     f"{file_extension or '[no extension]'}."
+                )
+                continue
+
+            if file_extension in IMAGE_MEDIA_TYPES and not is_real_image_file(file_path):
+                errors.append(
+                    f"Module {module_index} contains a file that is not a real "
+                    f"image: {Path(file_path).name}."
                 )
     return errors
 
@@ -228,11 +332,12 @@ def prepare_ai_input(module_count, data_payload, repeating_schedule_data=None):
         for file_path in module["files"]:
             file_extension = Path(file_path).suffix.lower()
             if file_extension in IMAGE_MEDIA_TYPES:
+                normalized_path = normalize_image_path(file_path)
                 image_number += 1
                 image = {
                     "source_id": f"image_{image_number}",
-                    "path": file_path,
-                    "media_type": IMAGE_MEDIA_TYPES[file_extension],
+                    "path": normalized_path,
+                    "media_type": IMAGE_MEDIA_TYPES[".png"],
                 }
                 images.append(image)
             else:
