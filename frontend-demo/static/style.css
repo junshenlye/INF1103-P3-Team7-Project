@@ -276,7 +276,8 @@ textarea { resize: vertical; font-family: inherit; }
 }
 .back-button:hover { color: var(--coral-dark); border-color: var(--coral-border); }
 
-.schedule-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
+/* eyebrow, title and text stack top to bottom, all on the left */
+.schedule-heading { display: flex; flex-direction: column; align-items: flex-start; gap: 0; }
 
 /* "Overview" title on the left, colour legend on the right */
 .overview-title-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -448,3 +449,119 @@ td small { display: block; color: var(--ink-soft); font-size: 0.76rem; }
 .dot-tip .tip-meta { color: #d9cdc8; font-size: 0.78rem; }             /* module · week */
 .dot-tip .tip-prio { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 0.78rem; }   /* priority */
 .dot-tip .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
+/* ================= UPLOADED FILES PREVIEW ================= */
+/* strip under the upload box: small cards for every file picked (built by tabs.js) */
+.file-previews[hidden] { display: none; }
+.preview-title { font-size: 0.85rem; font-weight: 700; margin-bottom: 8px; }
+.preview-title small { font-weight: 500; color: var(--ink-soft); }
+.preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 10px; }   /* as many cards per row as fit */
+.preview-card { position: relative; }
+.preview-open { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px; background: #fff; border: 1.5px solid var(--card-border); border-radius: 12px; cursor: pointer; font: inherit; color: var(--ink); transition: border-color 0.12s ease, transform 0.12s ease; }
+.preview-open:hover { border-color: var(--coral-light); transform: translateY(-1px); }
+.preview-open img { width: 100%; height: 72px; object-fit: cover; border-radius: 8px; }    /* cover = fill the box, crop the extra */
+.file-badge { width: 100%; height: 72px; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: var(--coral-bg); color: var(--coral-dark); font-family: "Fredoka", sans-serif; font-weight: 700; letter-spacing: 0.04em; }   /* PDF / DOCX tile */
+.preview-name { width: 100%; font-size: 0.74rem; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }   /* long names get "..." */
+.preview-size { font-size: 0.7rem; color: var(--ink-soft); }
+.preview-remove { position: absolute; top: -6px; right: -6px; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--card-border); background: #fff; color: var(--ink-soft); font-size: 0.95rem; line-height: 1; cursor: pointer; box-shadow: 0 2px 6px -2px rgba(73, 59, 58, 0.4); }
+.preview-remove:hover { color: #fff; background: var(--coral-dark); border-color: var(--coral-dark); }
+
+/* pop-up viewer: dark backdrop + white card (built by tabs.js) */
+.file-viewer { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(40, 30, 28, 0.6); }
+.file-viewer[hidden] { display: none; }
+.viewer-card { width: min(900px, 100%); max-height: 100%; display: flex; flex-direction: column; background: #fff; border-radius: 18px; overflow: hidden; box-shadow: 0 30px 60px -20px rgba(0, 0, 0, 0.5); }
+.viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--card-border); }
+.viewer-name { font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-close { border: none; background: var(--coral-bg); color: var(--coral-dark); width: 30px; height: 30px; border-radius: 50%; font-size: 1.2rem; line-height: 1; cursor: pointer; }
+.viewer-body { overflow: auto; display: flex; justify-content: center; background: #faf6f1; }
+.viewer-body img { max-width: 100%; max-height: 78vh; object-fit: contain; }   /* contain = whole image visible */
+.viewer-body iframe { width: 100%; height: 78vh; border: 0; }
+.viewer-note { padding: 40px 24px; margin: 0; text-align: center; color: var(--ink-soft); }
+
+/* ================= YOUR UPLOADED FILES (saved by the backend) ================= */
+/* a closed dropdown row; the files only show after the user clicks it */
+.uploads-card { background: #fff; border: 1px solid var(--card-border); border-radius: 18px; box-shadow: var(--shadow-soft); overflow: hidden; }
+.uploads-card[hidden] { display: none; }
+.uploads-card > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 14px; padding: 14px 20px; }   /* the clickable row */
+.uploads-card > summary::-webkit-details-marker { display: none; }                  /* hide the default triangle */
+.uploads-card > summary:hover { background: #fffaf5; }
+.uploads-icon { flex-shrink: 0; width: 34px; height: 34px; border-radius: 10px; background: var(--table-cream); display: flex; align-items: center; justify-content: center; font-size: 1rem; }
+.uploads-title { flex: 1; }
+.uploads-title strong { display: block; font-family: "Fredoka", sans-serif; font-size: 1rem; }
+.uploads-title span { font-size: 0.82rem; color: var(--ink-soft); }
+.uploads-count { font-size: 0.78rem; font-weight: 700; background: var(--table-cream); color: var(--ink); border-radius: 999px; padding: 4px 12px; }
+.uploads-card .chevron { border-color: var(--ink-soft); }
+.uploads-body { display: flex; flex-direction: column; gap: 16px; padding: 4px 20px 20px; border-top: 1px solid var(--card-border); padding-top: 16px; }   /* shown only when open */
+.uploads-module { font-size: 0.82rem; font-weight: 700; color: var(--coral-dark); margin-bottom: 8px; }   /* module name above its files */
+
+/* ---- saved files: replace / delete buttons and messages ---- */
+.card-actions { display: flex; gap: 6px; margin-top: 6px; }
+.mini-btn { flex: 1; border: 1.5px solid var(--card-border); background: #fff; color: var(--ink-soft); border-radius: 8px; padding: 4px 0; font: inherit; font-size: 0.72rem; font-weight: 700; cursor: pointer; }
+.mini-btn:hover { border-color: var(--coral-light); color: var(--coral-dark); }
+.mini-btn.danger:hover { background: var(--coral-bg); border-color: var(--coral-border); }   /* red-ish on hover for delete */
+.uploads-note { margin: 0; padding: 10px 14px; border-radius: 12px; background: var(--mint-bg); border: 1px solid var(--mint-border); font-size: 0.84rem; }   /* green "done" message */
+.uploads-note.is-error { background: var(--coral-bg); border-color: var(--coral-border); }                                                             /* red error message */
+.uploads-empty { margin: 0; padding: 14px 4px; text-align: center; color: var(--ink-soft); font-size: 0.88rem; }
+.uploads-where { margin: 0; font-size: 0.78rem; color: var(--ink-soft); }   /* "kept on this device only" note */
+
+/* ================= STUDY PLAN TAB ================= */
+.plan-link { align-self: flex-start; border: 1.5px solid var(--coral-border); background: var(--coral-bg); color: var(--coral-dark); border-radius: 999px; padding: 9px 18px; font-family: "Fredoka", sans-serif; font-weight: 600; font-size: 0.9rem; cursor: pointer; transition: background 0.15s ease; }   /* button on My Schedule */
+.plan-link:hover { background: #fbdcd6; }
+
+/* top card: progress bar + view switch */
+.study-summary { display: flex; flex-direction: column; gap: 16px; padding: 20px 24px; }
+.study-progress-text { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.study-progress-text strong { font-family: "Fredoka", sans-serif; font-size: 1.1rem; }
+.study-progress-text span { font-size: 0.84rem; color: var(--ink-soft); font-weight: 600; }
+.progress-bar { height: 10px; border-radius: 999px; background: var(--table-cream); overflow: hidden; }
+.progress-bar span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--coral-light), var(--coral-dark)); transition: width 0.3s ease; }   /* the filled part grows smoothly */
+.study-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+/* seg = two buttons that act like one switch */
+.seg { display: inline-flex; padding: 4px; gap: 2px; background: var(--table-cream); border-radius: 999px; }
+.seg-btn { border: none; background: transparent; padding: 7px 16px; border-radius: 999px; font: inherit; font-size: 0.85rem; font-weight: 700; color: var(--ink-soft); cursor: pointer; }
+.seg-btn[aria-pressed="true"] { background: #fff; color: var(--ink); box-shadow: 0 2px 6px -2px rgba(73, 59, 58, 0.35); }
+
+/* one card per assessment */
+.study-root { display: flex; flex-direction: column; gap: 14px; }
+.study-card { background: #fff; border: 1px solid var(--card-border); border-left: 6px solid var(--p-low); border-radius: 18px; padding: 18px 20px; box-shadow: var(--shadow-soft); display: flex; flex-direction: column; gap: 12px; }   /* coloured stripe on the left = priority */
+.study-card.prio-high { border-left-color: var(--p-high); }
+.study-card.prio-medium { border-left-color: var(--p-medium); }
+.study-card.is-complete { opacity: 0.65; }                                           /* fade a card when everything is ticked */
+.study-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.study-head .pdot { cursor: default; flex-shrink: 0; }
+.study-title { flex: 1; min-width: 160px; display: flex; flex-direction: column; }
+.study-title strong { font-family: "Fredoka", sans-serif; font-size: 1.02rem; }
+.study-title span { font-size: 0.82rem; color: var(--ink-soft); }
+.due-chip { font-size: 0.76rem; font-weight: 700; background: var(--table-cream); border-radius: 999px; padding: 4px 12px; white-space: nowrap; }
+.study-note { margin: 0; padding: 9px 12px; border-radius: 12px; background: #fff7df; border: 1px solid #f1d9a9; color: #6b5423; font-size: 0.82rem; }   /* yellow "busy week" tip */
+.study-meta { margin: 0; font-size: 0.8rem; color: var(--ink-soft); }
+.study-foot { font-size: 0.78rem; font-weight: 700; color: var(--ink-soft); }
+
+/* steps grouped by week: a small tag on the left, tasks on the right */
+.week-group { display: grid; grid-template-columns: 84px 1fr; gap: 12px; align-items: start; }
+.week-tag { font-size: 0.74rem; font-weight: 700; text-align: center; padding: 5px 0; border-radius: 10px; background: var(--table-cream); color: var(--ink); }
+.week-tag.is-now { background: var(--coral); color: #fff; }                          /* "This week" stands out */
+.todo-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* the checkbox row. the real checkbox is hidden; .todo-box is the pretty one */
+.todo { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; font-size: 0.9rem; line-height: 1.4; }
+.todo input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.todo-box { flex-shrink: 0; width: 20px; height: 20px; margin-top: 1px; border-radius: 7px; border: 2px solid #d9c9b6; background: #fff; display: flex; align-items: center; justify-content: center; transition: background 0.12s ease, border-color 0.12s ease; }
+.todo:hover .todo-box { border-color: var(--coral-light); }
+.todo input:focus-visible + .todo-box { outline: 3px solid rgba(239, 113, 101, 0.45); outline-offset: 2px; }   /* keyboard focus ring */
+.todo input:checked + .todo-box { background: var(--coral); border-color: var(--coral); }
+.todo input:checked + .todo-box::after { content: "✓"; color: #fff; font-size: 0.8rem; font-weight: 700; }   /* tick mark */
+.todo.is-done .todo-text { color: var(--ink-soft); text-decoration: line-through; }                       /* crossed out when done */
+
+@media (max-width: 680px) {
+  .week-group { grid-template-columns: 1fr; gap: 6px; }          /* tag above the tasks on phones */
+  .week-tag { justify-self: start; padding: 4px 12px; }
+}
+.todo { position: relative; }
+
+/* ---- study plan: hint line + colour filter ---- */
+.study-hint { margin: 0; font-size: 0.84rem; color: var(--ink-soft); }
+.study-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/* while the schedule is being rebuilt: dim the list and block clicks */
+.uploads-card.is-busy .uploads-body { opacity: 0.6; pointer-events: none; }

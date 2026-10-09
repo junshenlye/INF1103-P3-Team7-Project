@@ -74,6 +74,7 @@
       <nav class="tab-bar" role="tablist" aria-label="Dashboard views">
         <button type="button" class="tab is-active" role="tab" aria-selected="true" aria-controls="tab-add" id="tab-btn-add" data-tab-target="tab-add">Add Module</button>
         <button type="button" class="tab" role="tab" aria-selected="false" aria-controls="tab-schedule" id="tab-btn-schedule" data-tab-target="tab-schedule">My Schedule</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" aria-controls="tab-study" id="tab-btn-study" data-tab-target="tab-study">Study Plan</button>
       </nav>
 
       <!-- ===== TAB 1: ADD MODULE (visible at start because of is-active) ===== -->
@@ -88,6 +89,18 @@
         {% if connection_error %}
         <section class="result-banner is-error" role="alert"><div><strong>The configured API is not connected</strong><span>{{ connection_error }}</span></div></section>
         {% endif %}
+
+        <!-- uploaded files saved by the backend. <details> = built-in dropdown, closed until the user clicks it -->
+        <!-- always shown; tabs.js (loadUploads) fills in the files, or says "None yet" -->
+        <details class="uploads-card" id="uploads-root">
+          <summary>
+            <span class="uploads-icon" aria-hidden="true">🗂</span>
+            <span class="uploads-title"><strong>View uploaded files</strong><span>See, replace or delete what you've uploaded</span></span>
+            <span class="uploads-count">…</span>
+            <span class="chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="uploads-body"></div>
+        </details>
 
         <section class="panel form-card input-panel">
           <div class="card-heading">
@@ -152,8 +165,10 @@
         <div class="schedule-heading">
           <span class="eyebrow">✦ Your plan is ready</span>
           <h1>Here's your trimester at a glance</h1>
-          <p>Scroll through the weeks to spot peaks, plan ahead, and make a little more room to breathe.</p>
+          <p>See which weeks are packed with assessments, so you can start early and not get caught out.</p>
         </div>
+        <!-- data-goto-tab = tabs.js switches to that tab when clicked -->
+        <button type="button" class="plan-link" data-goto-tab="tab-study">What should I prepare? <span aria-hidden="true">→</span></button>
 
         <section class="overview-section panel">
           <div class="overview-title-row">
@@ -190,6 +205,27 @@
 
         {# data for the attention list: AI comments, checklist, and module info #}
         <script type="application/json" id="attention-data">{{ {'comments': comments or [], 'checklist': user_checklist or [], 'coverage': module_weight_coverage or [], 'ranking': relative_assessment_ranking or []}|tojson }}</script>
+      </section>
+
+
+      <!-- =====================================================================
+           TAB 3: STUDY PLAN (recommendations + to-do checklist, built by tabs.js)
+           ===================================================================== -->
+      <section class="page-content study-page tab-panel" id="tab-study" role="tabpanel" aria-labelledby="tab-btn-study" hidden>
+        <button type="button" class="back-button" data-goto-tab="tab-schedule"><span aria-hidden="true">←</span> Back to schedule</button>
+        <div class="schedule-heading">
+          <span class="eyebrow">✦ Your game plan</span>
+          <h1>What to do, week by week</h1>
+          <p>We plan backwards from each deadline, so every task has a week. Tick them off as you go.</p>
+        </div>
+        {# the plan needs the schedule data, so only show it when a timeline exists #}
+        {% if timeline %}
+        <!-- both are empty on purpose, tabs.js (buildStudyPlan) fills them -->
+        <section class="panel study-summary" id="study-summary"></section>
+        <div class="study-root" id="study-root"></div>
+        {% else %}
+        <div class="empty-schedule"><span>02</span><h3>Your study plan will appear here</h3><p>Build your schedule first and we'll turn it into weekly to-dos.</p></div>
+        {% endif %}
       </section>
 
     </main>
