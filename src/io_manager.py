@@ -30,13 +30,17 @@ LOGGER = logging.getLogger(__name__)
 
 
 def format_io_error(error):
-    """Give every IO error the same readable prefix."""
+    """Return one hard IO error using the pipeline's readable prefix."""
     return f"IO Manager error: {error}"
 
 
 # CLI boundary
 def parse_cli_arguments(argv=None):
-    """Parse terminal arguments into a plain dictionary."""
+    """Return the payload-file argument as a plain dictionary.
+
+    ``argv`` is optional so tests can provide arguments without changing the
+    real command line.
+    """
     parser = argparse.ArgumentParser(
         description="Process a JSON module payload for AI file intake."
     )
@@ -45,7 +49,11 @@ def parse_cli_arguments(argv=None):
 
 
 def load_cli_payload(payload_path):
-    """Read one JSON payload file supplied by the CLI."""
+    """Read a JSON payload file and return ``(payload, errors)``.
+
+    File access and JSON syntax failures stop IO processing and are returned as
+    hard errors. Payload structure is checked later by ``validate_payload``.
+    """
     LOGGER.info("Loading payload from %s", payload_path)
     try:
         with payload_path.open("r", encoding="utf-8") as payload_stream:
@@ -59,7 +67,11 @@ def load_cli_payload(payload_path):
 
 # Payload validation
 def validate_payload(payload):
-    """Return usable modules and standardized validation errors."""
+    """Return valid module dictionaries and hard metadata errors.
+
+    Invalid top-level fields stop the payload. Invalid module entries are
+    removed individually so the remaining modules can continue.
+    """
     if not isinstance(payload, dict):
         error = format_io_error("Payload must be a dictionary.")
         return None, [error]
@@ -117,7 +129,11 @@ def validate_payload(payload):
 
 # Image validation and temporary storage
 def validate_image(image_path):
-    """Confirm that a file is a readable image accepted by this pipeline."""
+    """Raise ``ValueError`` unless a path contains a supported, safe image.
+
+    This is the only image-validation boundary. Later managers may trust the
+    copied file's format, size, dimensions and readability.
+    """
     extension = image_path.suffix.lower()
     if extension not in ACCEPTED_IMAGE_FORMATS:
         accepted = ", ".join(ACCEPTED_IMAGE_FORMATS)
@@ -156,7 +172,8 @@ def validate_and_store_images(file_paths, base_directory=None):
     """Validate local images and copy accepted files into /tmp.
 
     The returned path list stays aligned with ``file_paths``. A failed position
-    contains ``None`` and its explanation is appended to the error list.
+    contains ``None`` and its explanation is appended to the returned hard-error
+    list. Relative paths are resolved from ``base_directory`` when provided.
     """
     LOGGER.info(
         "Validating and storing %d image(s) in %s",
@@ -219,7 +236,11 @@ def validate_and_store_images(file_paths, base_directory=None):
 
 # AI payload preparation
 def process_payload(payload, base_directory=None):
-    """Validate module data and prepare a clean payload for the AI manager."""
+    """Return an AI-ready payload and all hard IO errors.
+
+    This function combines the existing metadata and image steps without
+    repeating their checks. Modules whose images fail are left out.
+    """
     valid_modules, errors = validate_payload(payload)
     if valid_modules is None or not valid_modules:
         return None, errors
@@ -264,7 +285,10 @@ def process_payload(payload, base_directory=None):
 
 # Complete IO-manager entry point
 def process_cli_input(cli_input):
-    """Run the complete IO flow for parsed terminal input."""
+    """Load the CLI payload and return IO Manager's final ``(payload, errors)``.
+
+    The payload file's directory becomes the base for relative image paths.
+    """
     # argparse already guarantees payload_file is a Path object.
     payload_path = cli_input["payload_file"].expanduser().resolve()
     LOGGER.info("IO Manager started for %s", payload_path)
