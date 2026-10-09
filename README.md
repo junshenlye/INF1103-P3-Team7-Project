@@ -42,11 +42,11 @@ Final error output and exit codes are deferred until the AI, Logic, and Data
 Manager stages are connected. Relative file paths are resolved from the payload
 file's directory.
 
-Payload validation intentionally checks only the basic structure and types:
-`module_count` and `credit` must be integers, `modules` must be an array, and
-`module_title` must be a string. `copy_to_tmp()` separately checks that each
-`file_path` is a string and points to an available local file. File-type
-validation and AI processing are not part of this integration.
+Payload validation checks the basic structure and types: `module_count` and
+`credit` must be integers, `modules` must be an array, and `module_title` must
+be a string. `validate_and_store_images()` accepts readable JPEG and PNG images
+up to 10 MB and stores successful files in temporary working storage. AI
+processing is handled separately.
 
 IO failures are kept outside the AI payload as strings beginning with
 `IO Manager error:`. Invalid modules are removed, the remaining modules

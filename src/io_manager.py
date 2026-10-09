@@ -15,8 +15,17 @@ import logging
 from pathlib import Path
 import shutil
 import uuid
+from PIL import Image, UnidentifiedImageError
 
 TMP_DIRECTORY = Path("/tmp/stackplan-intake")
+ACCEPTED_IMAGE_FORMATS = {
+    ".jpeg": "JPEG",
+    ".jpg": "JPEG",
+    ".png": "PNG",
+}
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_LONG_SIDE = 7680
+MAX_SHORT_SIDE = 4320
 LOGGER = logging.getLogger(__name__)
 
 
@@ -106,20 +115,61 @@ def validate_payload(payload):
     return valid_modules, errors
 
 
-# Temporary file handling
-def copy_to_tmp(file_paths, base_directory=None):
-    """Validate local path strings and copy available files into /tmp.
+# Image validation and temporary storage
+def validate_image(image_path):
+    """Confirm that a file is a readable image accepted by this pipeline."""
+    extension = image_path.suffix.lower()
+    if extension not in ACCEPTED_IMAGE_FORMATS:
+        accepted = ", ".join(ACCEPTED_IMAGE_FORMATS)
+        raise ValueError(
+            f"Unsupported image format '{extension or 'none'}'. "
+            f"Accepted formats: {accepted}."
+        )
+
+    if image_path.stat().st_size > MAX_IMAGE_BYTES:
+        raise ValueError("Image exceeds the 10 MB size limit.")
+
+    try:
+        with Image.open(image_path) as image:
+            detected_format = image.format
+            width, height = image.size
+            image.verify()
+    except (
+        OSError,
+        SyntaxError,
+        UnidentifiedImageError,
+        Image.DecompressionBombError,
+    ) as error:
+        raise ValueError("File is not a readable image.") from error
+
+    if detected_format != ACCEPTED_IMAGE_FORMATS[extension]:
+        raise ValueError("Image extension does not match its contents.")
+    if width <= 10 or height <= 10:
+        raise ValueError("Image width and height must both exceed 10 pixels.")
+    if max(width, height) > MAX_LONG_SIDE or min(width, height) > MAX_SHORT_SIDE:
+        raise ValueError("Image resolution exceeds the supported 8K limit.")
+    if max(width, height) / min(width, height) > 200:
+        raise ValueError("Image aspect ratio cannot exceed 200:1.")
+
+
+def validate_and_store_images(file_paths, base_directory=None):
+    """Validate local images and copy accepted files into /tmp.
 
     The returned path list stays aligned with ``file_paths``. A failed position
     contains ``None`` and its explanation is appended to the error list.
     """
-    LOGGER.info("Copying %d file(s) into %s", len(file_paths), TMP_DIRECTORY)
+    LOGGER.info(
+        "Validating and storing %d image(s) in %s",
+        len(file_paths),
+        TMP_DIRECTORY,
+    )
     try:
         TMP_DIRECTORY.mkdir(parents=True, exist_ok=True)
     except OSError as error:
-        # No file can be copied when the shared working directory is unavailable.
+        # No image can be stored when the working directory is unavailable.
         stored_paths = [None] * len(file_paths)
         failure = format_io_error(error)
+        LOGGER.error("%s", failure)
         return stored_paths, [failure]
 
     stored_paths = []
@@ -140,9 +190,10 @@ def copy_to_tmp(file_paths, base_directory=None):
             if base_directory is not None and not source.is_absolute():
                 source = Path(base_directory) / source
 
+            validate_image(source)
+
             # The UUID prevents files with identical names from overwriting.
             destination = TMP_DIRECTORY / f"{uuid.uuid4().hex}-{source.name}"
-            # copyfile performs the existence, readability, and file checks.
             shutil.copyfile(source, destination)
         except (OSError, ValueError) as error:
             if destination is not None:
@@ -150,14 +201,16 @@ def copy_to_tmp(file_paths, base_directory=None):
 
             # None preserves the failed file's position for module matching.
             stored_paths.append(None)
-            errors.append(
-                format_io_error(f"Could not copy {file_path}: {error}")
+            failure = format_io_error(
+                f"Could not store image {file_path}: {error}"
             )
+            LOGGER.warning("%s", failure)
+            errors.append(failure)
             continue
 
         stored_paths.append(str(destination))
     LOGGER.info(
-        "Temporary copy completed with %d success(es) and %d failure(s)",
+        "Image storage completed with %d success(es) and %d failure(s)",
         len(stored_paths) - stored_paths.count(None),
         stored_paths.count(None),
     )
@@ -176,11 +229,11 @@ def process_payload(payload, base_directory=None):
     for module in valid_modules:
         file_paths.append(module.get("file_path"))
 
-    stored_paths, copy_errors = copy_to_tmp(
+    stored_paths, image_errors = validate_and_store_images(
         file_paths,
         base_directory=base_directory,
     )
-    errors.extend(copy_errors)
+    errors.extend(image_errors)
 
     processed_modules = []
     for position, stored_path in enumerate(stored_paths):
