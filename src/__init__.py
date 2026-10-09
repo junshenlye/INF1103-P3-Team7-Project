@@ -1,3 +1,3 @@
 """StackPlan processing package."""
 
-from . import io_manager
+from . import ai_manager, io_manager
