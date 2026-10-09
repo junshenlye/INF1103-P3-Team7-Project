@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Stackplan — build your trimester schedule">
+    <title>Stackplan — Your trimester schedule</title>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Quicksand:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='tabs.js') }}" defer></script>
+  </head>
+  <body data-api-base="{{ api_base_url }}" data-has-schedule="{{ 'true' if timeline else 'false' }}">
+    <main class="app-shell">
+      <div class="background-shape shape-one" aria-hidden="true"></div>
+      <div class="background-shape shape-two" aria-hidden="true"></div>
+
+      <svg class="doodle bear-doodle" viewBox="0 0 120 120" aria-hidden="true" focusable="false">
+        <circle cx="26" cy="22" r="15" fill="#d8ae7a"/><circle cx="94" cy="22" r="15" fill="#d8ae7a"/>
+        <circle cx="26" cy="22" r="7" fill="#eccba0"/><circle cx="94" cy="22" r="7" fill="#eccba0"/>
+        <circle cx="60" cy="62" r="42" fill="#e3bd8c"/>
+        <ellipse cx="60" cy="72" rx="16" ry="11" fill="#f3dcb8"/>
+        <circle cx="46" cy="56" r="4" fill="#4a3630"/><circle cx="74" cy="56" r="4" fill="#4a3630"/>
+        <ellipse cx="33" cy="68" rx="6" ry="4" fill="#f1a98f" opacity="0.6"/><ellipse cx="87" cy="68" rx="6" ry="4" fill="#f1a98f" opacity="0.6"/>
+        <circle cx="60" cy="68" r="3.5" fill="#4a3630"/>
+      </svg>
+      <svg class="doodle bunny-doodle" viewBox="0 0 120 120" aria-hidden="true" focusable="false">
+        <path d="M36 10 C24 20 24 46 40 56 C50 46 46 20 36 10 Z" fill="#ffffff" stroke="#f0d9e8" stroke-width="2"/>
+        <path d="M84 10 C96 20 96 46 80 56 C70 46 74 20 84 10 Z" fill="#ffffff" stroke="#f0d9e8" stroke-width="2"/>
+        <circle cx="60" cy="68" r="42" fill="#ffffff" stroke="#f0d9e8" stroke-width="2"/>
+        <circle cx="46" cy="62" r="4" fill="#4a3630"/><circle cx="74" cy="62" r="4" fill="#4a3630"/>
+        <ellipse cx="33" cy="74" rx="6" ry="4" fill="#ffc9de" opacity="0.7"/><ellipse cx="87" cy="74" rx="6" ry="4" fill="#ffc9de" opacity="0.7"/>
+        <ellipse cx="60" cy="76" rx="4.5" ry="3.5" fill="#ffb6ce"/>
+      </svg>
+
+      <header class="site-header">
+        <a class="brand" href="{{ url_for('index') }}" aria-label="Stackplan home">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span>Stackplan</span>
+        </a>
+        <div class="term-chip">
+          <span class="term-dot" aria-hidden="true"></span>
+          {% if trimester_context and trimester_context.label %}{{ trimester_context.label }}{% else %}Trimester 1{% endif %}
+          {% if current_week %}&nbsp;· Week {{ current_week }}{% endif %}
+          {% if trimester_context and trimester_context.is_recess %}&nbsp;· Recess{% endif %}
+        </div>
+      </header>
+
+      <nav class="tab-bar" role="tablist" aria-label="Dashboard views">
+        <button type="button" class="tab is-active" role="tab" aria-selected="true" aria-controls="tab-add" id="tab-btn-add" data-tab-target="tab-add">Add Module</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" aria-controls="tab-schedule" id="tab-btn-schedule" data-tab-target="tab-schedule">My Schedule</button>
+      </nav>
+
+      <section class="page-content add-page tab-panel is-active" id="tab-add" role="tabpanel" aria-labelledby="tab-btn-add">
+        <div class="hero-copy">
+          <span class="eyebrow">✦ Your trimester, made lighter</span>
+          <h1>Build your trimester schedule</h1>
+          <p>Add your modules and assessment details. We'll turn them into a clear weekly plan schedule!</p>
+        </div>
+
+        {% if connection_error %}
+        <section class="result-banner is-error" role="alert"><div><strong>The configured API is not connected</strong><span>{{ connection_error }}</span></div></section>
+        {% endif %}
+
+        <section class="panel form-card input-panel">
+          <div class="card-heading">
+            <div>
+              <span class="step-label">Step 1 of 1</span>
+              <h2>Add your modules</h2>
+              {% if module_weight_coverage %}<p class="already-added">Already in your schedule: <strong>{{ module_weight_coverage|map(attribute='module_name')|join(', ') }}</strong>. Anything you add here is added to it.</p>{% else %}<p>You can always come back and refine these later.</p>{% endif %}
+            </div>
+            <button class="secondary-button add-module-button" type="button" id="add-module"><span aria-hidden="true">+</span> Add another module</button>
+          </div>
+
+          <form action="{{ api_base_url }}/api/extractions" method="post" enctype="multipart/form-data" id="assessment-form">
+            <input type="hidden" name="module_count" id="module-count" value="0">
+            <div id="module-list" class="module-list"></div>
+
+            <button class="primary-button build-button" type="submit"><span>Build my schedule</span><span aria-hidden="true" class="button-arrow">→</span><span class="build-timer" hidden></span></button>
+
+            <section class="progress-panel" id="extraction-progress" aria-live="polite" hidden>
+              <div class="progress-heading"><strong id="progress-stage">Preparing evidence…</strong><span id="progress-elapsed">0.0s</span></div>
+              <p id="progress-message">Each module is being interpreted and placed on one trimester timeline.</p>
+            </section>
+          </form>
+        </section>
+
+        <template id="module-template">
+          <article class="module-entry module-block">
+            <div class="module-title-row"><h3><span data-module-number></span> Module</h3><button type="button" class="text-button remove-button" data-remove-module>Remove</button></div>
+            <div class="field-grid">
+              <label><span>Module name or code</span><input data-field="module_name" maxlength="64" placeholder="e.g. INF1103" required></label>
+              <label><span>Credit units</span><input data-field="credit_units" type="number" min="0.5" max="60" step="0.5" placeholder="e.g. 6"></label>
+            </div>
+            <label class="drop-zone" data-drop-zone tabindex="0">
+              <input class="file-input sr-only" data-field="source_files" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.txt,.md,.csv,.json,.docx" multiple>
+              <span class="upload-icon" aria-hidden="true">↥</span>
+              <span class="drop-text"><strong>Drop an assessment document here</strong><small>or click to browse · PDF, DOCX or image · 10 MB each</small></span>
+              <div class="file-list" aria-live="polite"></div>
+            </label>
+          </article>
+        </template>
+      </section>
+
+      <section class="page-content schedule-page tab-panel" id="tab-schedule" role="tabpanel" aria-labelledby="tab-btn-schedule" hidden>
+        <button type="button" class="back-button" id="back-to-add"><span aria-hidden="true">←</span> Add more info</button>
+
+        <div class="schedule-heading">
+          <div>
+            <span class="eyebrow">✦ Your plan is ready</span>
+            <h1>Here's your trimester at a glance</h1>
+            <p>Scroll through the weeks to spot peaks, plan ahead, and make a little more room to breathe.</p>
+          </div>
+          <div class="summary-pill"><strong>{{ relative_assessment_ranking|length }}</strong><span>assessment{{ '' if relative_assessment_ranking|length == 1 else 's' }}</span></div>
+        </div>
+
+        <section class="overview-section panel">
+          <div class="overview-title-row">
+            <div><h2>Overview</h2><p>Each dot is an assessment. Hover or tap a dot to see what it is.</p></div>
+            <div class="legend" aria-label="Priority legend">
+              <span><i class="dot p-high"></i>High priority</span>
+              <span><i class="dot p-medium"></i>Medium</span>
+              <span><i class="dot p-low"></i>Low</span>
+              <span><i class="dot p-unknown"></i>Not enough info</span>
+            </div>
+          </div>
+
+          {% if timeline %}
+          <div class="grid-filters" id="grid-filters" aria-label="Filter the schedule"></div>
+          <div class="grid-filters" id="grid-filters"></div>
+          <div class="priority-scroll"><table class="priority-table" id="priority-grid" aria-label="Assessments by module and week"></table></div>
+          <div class="dot-tip" id="dot-tip" role="tooltip" hidden></div>
+          <script type="application/json" id="schedule-data">{{ {'timeline': timeline or [], 'ranking': relative_assessment_ranking or [], 'coverage': module_weight_coverage or [], 'current_week': current_week}|tojson }}</script>
+          {% else %}
+          <div class="empty-schedule"><span>01</span><h3>Your schedule will appear here</h3><p>Add one or more modules and their assessment evidence.</p></div>
+          {% endif %}
+        </section>
+
+        <details class="attention-card" id="attention-root" hidden></details>
+        <script type="application/json" id="attention-data">{{ {'comments': comments or [], 'checklist': user_checklist or [], 'coverage': module_weight_coverage or [], 'ranking': relative_assessment_ranking or []}|tojson }}</script>
+      </section>
+
+    </main>
+  </body>
+</html>
