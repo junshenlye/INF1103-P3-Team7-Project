@@ -10,12 +10,11 @@ from . import ai_manager, io_manager
 LOGGER = logging.getLogger(__name__)
 
 
-async def run_pipeline(argv=None):
-    """Run IO then AI and return their final ``(payload, errors)``.
+def main(argv=None):
+    """Run IO then AI, print one JSON result and return ``(payload, errors)``.
 
-    Main only coordinates managers; it does not repeat their validation. The
-    same hard-error list is passed forward, while AI soft issues remain inside
-    each module's ``follow_ups`` metadata.
+    Main only coordinates managers. It passes the same hard-error list forward
+    and leaves soft AI issues inside each module's ``follow_ups`` metadata.
     """
     LOGGER.info("Pipeline started")
 
@@ -26,33 +25,22 @@ async def run_pipeline(argv=None):
             "Pipeline stopped after IO Manager with %d hard error(s)",
             len(errors),
         )
-        return None, errors
+    else:
+        # AI Manager appends only hard failures to the existing error list.
+        payload, errors = asyncio.run(ai_manager.process_payload(payload, errors))
+        if payload is None:
+            LOGGER.warning(
+                "Pipeline stopped after AI Manager with %d hard error(s)",
+                len(errors),
+            )
+        else:
+            log_result = LOGGER.warning if errors else LOGGER.info
+            log_result(
+                "Pipeline completed with %d module(s) and %d hard error(s)",
+                payload["module_count"],
+                len(errors),
+            )
 
-    # AI Manager owns AI validation and keeps soft issues inside module
-    # follow_ups. Only hard failures are appended to this same error list.
-    payload, errors = await ai_manager.process_payload(payload, errors)
-    if payload is None:
-        LOGGER.warning(
-            "Pipeline stopped after AI Manager with %d hard error(s)",
-            len(errors),
-        )
-        return None, errors
-
-    log_result = LOGGER.warning if errors else LOGGER.info
-    log_result(
-        "Pipeline completed with %d module(s) and %d hard error(s)",
-        payload["module_count"],
-        len(errors),
-    )
-    return payload, errors
-
-
-def main(argv=None):
-    """Run the pipeline, print one machine-readable JSON result and return it.
-
-    Returning the tuple keeps the entry point simple to test or reuse.
-    """
-    payload, errors = asyncio.run(run_pipeline(argv))
     print(
         json.dumps(
             {"payload": payload, "errors": errors},

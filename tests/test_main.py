@@ -1,7 +1,5 @@
 """Tests for the manager chain in the CLI entry point."""
 
-import asyncio
-
 from src import main
 
 
@@ -51,7 +49,7 @@ def test_pipeline_flushes_hard_errors_and_keeps_soft_comments(monkeypatch):
 
     monkeypatch.setattr(main.ai_manager, "process_payload", fake_ai_process)
 
-    payload, errors = asyncio.run(main.run_pipeline([]))
+    payload, errors = main.main([])
 
     assert payload is ai_payload
     assert errors is hard_errors
@@ -88,7 +86,7 @@ def test_pipeline_stops_when_io_has_no_payload(monkeypatch):
 
     monkeypatch.setattr(main.ai_manager, "process_payload", fake_ai_process)
 
-    payload, errors = asyncio.run(main.run_pipeline([]))
+    payload, errors = main.main([])
 
     assert payload is None
     assert errors is hard_errors

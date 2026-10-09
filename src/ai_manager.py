@@ -15,6 +15,7 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import time
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -141,12 +142,14 @@ async def call_model(
     messages,
     thinking,
     semaphore,
+    task_name,
     json_mode=False,
 ):
     """Send one Qwen request and return its non-empty text response.
 
-    ``semaphore`` enforces the pipeline-wide concurrency limit. ``json_mode`` is
-    used only when the provider can safely be asked for a JSON object.
+    ``semaphore`` enforces the pipeline-wide concurrency limit. Timing starts
+    after the semaphore is acquired, so logs measure the HTTP request rather
+    than queue time. ``json_mode`` is used only when the provider supports it.
     """
     request = {
         "model": model,
@@ -157,7 +160,27 @@ async def call_model(
         request["response_format"] = {"type": "json_object"}
 
     async with semaphore:
-        response = await client.chat.completions.create(**request)
+        LOGGER.info("HTTP task started: %s [%s]", task_name, model)
+        started_at = time.perf_counter()
+        try:
+            response = await client.chat.completions.create(**request)
+        except Exception:
+            elapsed_seconds = time.perf_counter() - started_at
+            LOGGER.info(
+                "HTTP task failed: %s [%s] after %.2f seconds",
+                task_name,
+                model,
+                elapsed_seconds,
+            )
+            raise
+
+        elapsed_seconds = time.perf_counter() - started_at
+        LOGGER.info(
+            "HTTP task completed: %s [%s] in %.2f seconds",
+            task_name,
+            model,
+            elapsed_seconds,
+        )
 
     try:
         content = response.choices[0].message.content
@@ -197,6 +220,7 @@ async def check_relevance(client, module_title, image_data, semaphore):
         create_image_messages(RELEVANCE_PROMPT, module_title, image_data),
         thinking=False,
         semaphore=semaphore,
+        task_name=f"{module_title} relevance",
         json_mode=True,
     )
     relevance = parse_json_content(content)
@@ -217,6 +241,7 @@ async def interpret_assessments(client, module_title, image_data, semaphore):
         create_image_messages(INTERPRETATION_PROMPT, module_title, image_data),
         thinking=True,
         semaphore=semaphore,
+        task_name=f"{module_title} interpretation",
     )
 
 
@@ -243,6 +268,7 @@ async def normalize_assessments(
         ),
         thinking=True,
         semaphore=semaphore,
+        task_name=f"{module_title} normalization",
     )
     normalized = parse_json_content(content)
     if not isinstance(normalized, dict):

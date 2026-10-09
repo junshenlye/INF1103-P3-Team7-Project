@@ -26,14 +26,23 @@ The repository includes `test_payload.json`. Its format is:
 }
 ```
 
+Create the local environment file and add your DashScope API key:
+
+```sh
+cp .env.example .env
+```
+
+```dotenv
+DASHSCOPE_API_KEY="your-key"
+DASHSCOPE_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+```
+
 Install the dependencies and pass the payload file to the CLI:
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-export DASHSCOPE_API_KEY="your-key"
-export DASHSCOPE_BASE_URL="your-compatible-endpoint"
 python -m src.main test_payload.json
 ```
 
@@ -53,11 +62,34 @@ IO failures are kept outside the AI payload as strings beginning with
 `IO Manager error:`. Invalid modules are removed, the remaining modules
 continue, and the collected messages can be passed to the future logging layer.
 
+## Testing
+
+Run the offline unit tests without making Qwen requests:
+
+```sh
+source .venv/bin/activate
+PYTHONPATH=. pytest -q
+```
+
+Run a lower-cost live AI Manager check with one representative module:
+
+```sh
+docker compose build
+./scripts/run_quick_test.sh
+```
+
+The quick payload uses INF1104 and exercises repeated tutorials, group weights,
+fixed teaching weeks and the final examination. A relevant module makes one
+Qwen Flash relevance request and two Qwen Plus reasoning requests.
+
 ## Logging
 
 The CLI enables progress logs for the pipeline and its managers. Errors remain
 in the returned error list for the next pipeline stage. Logs are not stored in
-files; Docker captures the console stream automatically.
+files; Docker captures the console stream automatically. Each Qwen HTTP request
+logs its module, processing pass, model, outcome and elapsed provider time. The
+measurement starts after the concurrency slot is acquired, so queue time is not
+included.
 
 ## Docker
 
@@ -71,6 +103,9 @@ docker compose run --rm stackplan
 Compose reads `.env`, mounts the repository as read-only input, and supplies
 `test_payload.json` to the container. These defaults are defined in
 `compose.yaml`, so credentials do not need to appear in the run command.
+
+The default Compose command uses `test_payload.json` and runs all four example
+modules. Use the quick test above during normal development to reduce token use.
 
 To run the image without Compose, pass the runtime environment explicitly:
 

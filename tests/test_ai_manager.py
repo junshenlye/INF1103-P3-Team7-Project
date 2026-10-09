@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -79,6 +80,41 @@ def make_normalization(module_title, position=0):
         "notes": [],
         "follow_ups": [],
     }
+
+
+def test_http_task_logs_provider_time(monkeypatch, caplog):
+    """HTTP logs identify the task, model and measured provider duration."""
+    clock_values = iter([10.0, 12.345])
+    monkeypatch.setattr(
+        ai_manager.time,
+        "perf_counter",
+        lambda: next(clock_values),
+    )
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(return_value=make_response("response"))
+            )
+        )
+    )
+    caplog.set_level(logging.INFO, logger=ai_manager.__name__)
+
+    content = asyncio.run(
+        ai_manager.call_model(
+            fake_client,
+            "qwen-test",
+            [],
+            thinking=False,
+            semaphore=asyncio.Semaphore(1),
+            task_name="INF1104 relevance",
+        )
+    )
+
+    assert content == "response"
+    assert (
+        "HTTP task completed: INF1104 relevance [qwen-test] "
+        "in 2.35 seconds"
+    ) in caplog.text
 
 
 def test_concurrent_requests_are_limited_and_output_order_is_preserved(tmp_path):
