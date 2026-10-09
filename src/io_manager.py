@@ -13,7 +13,6 @@ import argparse
 import json
 import logging
 from pathlib import Path
-import shutil
 import uuid
 from PIL import Image, UnidentifiedImageError
 
@@ -169,7 +168,7 @@ def validate_image(image_path):
 
 
 def validate_and_store_images(file_paths, base_directory=None):
-    """Validate local images and copy accepted files into /tmp.
+    """Validate local images and store lossless PNG copies in /tmp.
 
     The returned path list stays aligned with ``file_paths``. A failed position
     contains ``None`` and its explanation is appended to the returned hard-error
@@ -209,9 +208,18 @@ def validate_and_store_images(file_paths, base_directory=None):
 
             validate_image(source)
 
-            # The UUID prevents files with identical names from overwriting.
-            destination = TMP_DIRECTORY / f"{uuid.uuid4().hex}-{source.name}"
-            shutil.copyfile(source, destination)
+            # PNG preserves decoded pixels without adding another lossy encode.
+            destination = TMP_DIRECTORY / f"{uuid.uuid4().hex}-{source.stem}.png"
+            with Image.open(source) as image:
+                output_image = (
+                    image.convert("RGB") if image.mode == "CMYK" else image
+                )
+                output_image.save(
+                    destination,
+                    format="PNG",
+                    optimize=True,
+                    compress_level=9,
+                )
         except (OSError, ValueError) as error:
             if destination is not None:
                 destination.unlink(missing_ok=True)

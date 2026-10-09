@@ -55,8 +55,10 @@ are resolved from the payload file's directory.
 IO payload validation checks the basic structure and types: `module_count` and
 `credit` must be integers, `modules` must be an array, and `module_title` must
 be a string. `validate_and_store_images()` accepts readable JPEG and PNG images
-up to 10 MB and stores successful files in temporary working storage. The AI
-Manager receives only this validated IO output.
+up to 10 MB and stores successful files as optimized, lossless PNGs in temporary
+working storage. This preserves the decoded pixels without another lossy encode;
+JPEG source files may already contain lossy compression. The AI Manager receives
+only this validated IO output.
 
 IO failures are kept outside the AI payload as strings beginning with
 `IO Manager error:`. Invalid modules are removed, the remaining modules
