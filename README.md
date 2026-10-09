@@ -1,8 +1,8 @@
 # Stackplan
 
-This repository starts with a small command-line intake workflow. It reads a
-module payload, copies each module file into `/tmp/stackplan-intake`, and returns
-the transformed data for the next pipeline stage.
+The command-line workflow passes module evidence through the IO Manager and AI
+Manager. IO validates and stores images; AI interprets and normalizes assessment
+information for scheduling.
 
 ## Local use
 
@@ -26,6 +26,17 @@ The repository includes `test_payload.json`. Its format is:
 }
 ```
 
+Create the local environment file and add your DashScope API key:
+
+```sh
+cp .env.example .env
+```
+
+```dotenv
+DASHSCOPE_API_KEY="your-key"
+DASHSCOPE_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+```
+
 Install the dependencies and pass the payload file to the CLI:
 
 ```sh
@@ -35,45 +46,79 @@ python -m pip install -r requirements.txt
 python -m src.main test_payload.json
 ```
 
-Each successful output module preserves `module_title` and `credit` and replaces
-`file_path` with `stored_file_path`. Failed modules are excluded from the clean
-AI payload and their messages are collected in a separate pipeline error list.
-Final error output and exit codes are deferred until the AI, Logic, and Data
-Manager stages are connected. Relative file paths are resolved from the payload
-file's directory.
+The CLI emits one JSON object containing `payload` and `errors`. Failed modules
+are excluded from the clean payload, while their hard errors remain in the
+shared error list for later managers. AI uncertainties stay with their module as
+`follow_ups` metadata and are not promoted to hard errors. Relative file paths
+are resolved from the payload file's directory.
 
-Payload validation checks the basic structure and types: `module_count` and
+IO payload validation checks the basic structure and types: `module_count` and
 `credit` must be integers, `modules` must be an array, and `module_title` must
 be a string. `validate_and_store_images()` accepts readable JPEG and PNG images
-up to 10 MB and stores successful files in temporary working storage. AI
-processing is handled separately.
+up to 10 MB and stores successful files in temporary working storage. The AI
+Manager receives only this validated IO output.
 
 IO failures are kept outside the AI payload as strings beginning with
 `IO Manager error:`. Invalid modules are removed, the remaining modules
 continue, and the collected messages can be passed to the future logging layer.
 
+## Testing
+
+Run the offline unit tests without making Qwen requests:
+
+```sh
+source .venv/bin/activate
+PYTHONPATH=. pytest -q
+```
+
+Run a lower-cost live AI Manager check with one representative module:
+
+```sh
+docker compose build
+./scripts/run_quick_test.sh
+```
+
+The quick payload uses INF1104 and exercises repeated tutorials, group weights,
+fixed teaching weeks and the final examination. A relevant module makes one
+Qwen Flash relevance request and two Qwen Plus reasoning requests.
+
 ## Logging
 
-The CLI enables the progress logs produced by the IO Manager. These logs show
-payload loading, validation, temporary file copying, and payload preparation.
-Errors remain in the returned error list for the future pipeline to handle.
-Logs are not stored in files; Docker captures the console stream automatically.
+The CLI enables progress logs for the pipeline and its managers. Errors remain
+in the returned error list for the next pipeline stage. Logs are not stored in
+files; Docker captures the console stream automatically. Each Qwen HTTP request
+logs its module, processing pass, model, outcome and elapsed provider time. The
+measurement starts after the concurrency slot is acquired, so queue time is not
+included.
 
 ## Docker
 
-Build the CLI image:
+Build and run the CLI with Docker Compose:
 
 ```sh
-docker build -t stackplan .
+docker compose build
+docker compose run --rm stackplan
 ```
 
-Run it with a local evidence directory mounted read-only:
+Compose reads `.env`, mounts the repository as read-only input, and supplies
+`test_payload.json` to the container. These defaults are defined in
+`compose.yaml`, so credentials do not need to appear in the run command.
+
+The default Compose command uses `test_payload.json` and runs all four example
+modules. Use the quick test above during normal development to reduce token use.
+
+To run the image without Compose, pass the runtime environment explicitly:
 
 ```sh
 docker run --rm \
+  --env-file .env \
   --volume "$PWD:/workspace:ro" \
   stackplan /workspace/test_payload.json
 ```
+
+The Dockerfile does not copy `.env` into the image. Secrets copied during a
+build remain in image layers, so the `.dockerignore` entry for `.env` should
+remain in place.
 
 The IO manager creates `/tmp/stackplan-intake` when it copies the first file.
 This directory is only working storage, and its cached files disappear with the
