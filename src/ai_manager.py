@@ -1,1157 +1,830 @@
-"""Extract structured assessment facts from module evidence."""
+"""Asynchronous assessment interpretation and normalization.
+
+Each relevant module uses two Qwen reasoning passes. The first builds a
+source-faithful evidence memo without the final schema. The second converts
+that memo into small assessment prototypes. Local procedural code then expands
+repeated assessments, assigns stable IDs, and preserves soft uncertainties as
+follow-ups for Logic Manager.
+"""
 
 import asyncio
 import base64
-import inspect
 import json
 import logging
+import mimetypes
 import os
 from pathlib import Path
+import re
 import time
-import zipfile
-from xml.etree import ElementTree
 
-from openai import AsyncOpenAI, OpenAIError
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+
+from .ai_prompts import (
+    INTERPRETATION_PROMPT,
+    NORMALIZATION_PROMPT,
+    RELEVANCE_PROMPT,
+)
 
 
+RELEVANCE_MODEL = "qwen3.7-flash"
+REASONING_MODEL = "qwen3.7-plus"
+MAX_CONCURRENT_REQUESTS = 4
 LOGGER = logging.getLogger(__name__)
 
-DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-PRECHECK_MODEL = "qwen3.7-flash"
-CONTEXT_MODEL = "qwen3.7-plus"
-REASONING_MODEL = "qwen3.7-plus"
-MAX_DOCUMENT_CHARS = 12_000
-DEFAULT_CONCURRENT_REQUESTS = 2
-MAX_CONCURRENT_REQUESTS = 8
-DEFAULT_MODEL_TIMEOUT_SECONDS = 45
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 240
-DEFAULT_MODEL_RETRIES = 0
-
-PRECHECK_SYSTEM_PROMPT = """Classify whether each supplied image contains readable
-assessment scheduling evidence for the named module. Do not extract a schedule.
-Return uncertain when relevance cannot be safely rejected."""
-
-CONTEXT_SYSTEM_PROMPT = """Copy explicit academic assessment evidence into the
-supplied JSON schema. Preserve source wording and source IDs. Do not infer missing
-facts, reconcile conflicts, calculate totals, or create a schedule."""
-
-REASONING_SYSTEM_PROMPT = """Reconcile supplied assessment evidence into the
-supplied schedule schema.
-
-Rules:
-- Never invent dates, weeks, weights, recurrence, credits, or assessment status.
-- Do not give study advice or calculate priority, pressure, or relative scores.
-- Return partial facts when evidence is incomplete; use null for unknown fields.
-- Preserve every visible item, but classify how it affects the module total:
-  graded for an independently weighted assessment, aggregate for a parent summary,
-  bonus for marks outside the normal total, ungraded for zero-mark practice or
-  formative work, and uncertain when the evidence cannot decide.
-- Do not count both an aggregate parent and its independently weighted children.
-- Do not force the graded items to total 100%. Missing or unusual totals are valid
-  incomplete evidence and must be explained for later user review.
-- A clearly stated teaching week is sufficient scheduling evidence. Do not request
-  a calendar date when an exact week is already known.
-- A total weight and known week range are sufficient for recurring participation.
-  Do not request a per-week weight breakdown unless the source says each occurrence
-  is weighted separately.
-- Keep feedback compact: one missing-information item per assessment and no more
-  than three checklist items for the module. Do not repeat the same issue.
-- Participation, attendance, tutorial engagement, and student engagement are
-  participation assessments, not assignments.
-- A percentage covering repeated participation is the total trimester weight.
-  Use per_occurrence only when the source explicitly says each occurrence has
-  that weight.
-- Return JSON only. Use a hard error only when the request cannot be processed.
-"""
-
-# Multi-module extraction
+# Values below form the stable part of the payload contract. Model wording is
+# cleaned against these values before it reaches Logic Manager.
+SCHEDULE_KINDS = {"week", "week_range", "date", "recurring", "unknown"}
+WEIGHT_SCOPES = {"module", "part", "group", "unknown"}
+RECORD_ROLES = {"assessment", "group"}
+COVERAGE_STATUSES = {"appears_complete", "partial", "unclear"}
+ASSESSMENT_TYPES = {
+    "assignment",
+    "quiz",
+    "tutorial",
+    "project",
+    "test",
+    "exam",
+    "presentation",
+    "essay",
+    "participation",
+    "other",
+}
+TYPE_ALIASES = {
+    "assignments": "assignment",
+    "quizzes": "quiz",
+    "tutorials": "tutorial",
+    "projects": "project",
+    "tests": "test",
+    "exams": "exam",
+    "final_exam": "exam",
+    "final_written_exam": "exam",
+    "competency_test": "test",
+    "presentations": "presentation",
+    "oral_presentation": "presentation",
+    "essays": "essay",
+}
+FOLLOW_UP_FIELDS = {
+    "assessment_types",
+    "count",
+    "graded_status",
+    "parent_assessment_id",
+    "schedule",
+    "source_coverage",
+    "type",
+    "weight_percent",
+    "group_weight_percent",
+}
 
 
-def process(input_data, api_caller=None):
-    """Synchronous entry point for the current Flask request path."""
-    _require_no_running_loop("process", "process_async")
-    process_coroutine = process_async(input_data, api_caller)
-    result = asyncio.run(process_coroutine)
-    return result
+def format_ai_error(module_title, error):
+    """Return one hard-error string for a module or AI configuration issue.
+
+    Hard errors leave the module payload and are appended to the shared pipeline
+    error list. Soft uncertainties use module ``follow_ups`` instead.
+    """
+    return f"AI Manager error: {module_title}: {error}"
 
 
-async def process_async(input_data, api_caller=None):
-    """Extract modules as concurrent network tasks, preserving input order."""
-    requested_modules = input_data.get("modules", [])
-    repeating_schedule_data = input_data.get("repeating_schedule_data")
-    if not requested_modules:
-        return {
-            "modules": [],
-            "failures": [],
-            "models_used": [],
-            "model_runs": [],
-        }
+def create_client():
+    """Create the shared asynchronous Qwen client.
 
-    module_count = len(requested_modules)
-    request_limit = _concurrent_request_limit(module_count)
-    LOGGER.info(
-        "Extracting %d module(s) with up to %d concurrent request(s)",
-        module_count,
-        request_limit,
-    )
-    request_slots = asyncio.Semaphore(request_limit)
-    module_tasks = []
-    for module in requested_modules:
-        extraction = _extract_module(
-            module,
-            repeating_schedule_data,
-            api_caller,
-            request_slots,
+    The API key and compatible endpoint come from the environment. Missing
+    configuration raises ``ValueError`` before any module requests are started.
+    """
+    load_dotenv()
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    base_url = os.getenv("DASHSCOPE_BASE_URL")
+    if not api_key or not base_url:
+        raise ValueError(
+            "DASHSCOPE_API_KEY and DASHSCOPE_BASE_URL must be configured."
         )
-        module_task = asyncio.create_task(extraction)
-        module_tasks.append(module_task)
 
-    raw_request_timeout = os.getenv(
-        "AI_REQUEST_TIMEOUT_SECONDS",
-        str(DEFAULT_REQUEST_TIMEOUT_SECONDS),
-    )
-    try:
-        request_timeout = float(raw_request_timeout)
-    except ValueError:
-        request_timeout = DEFAULT_REQUEST_TIMEOUT_SECONDS
-    if request_timeout <= 0:
-        request_timeout = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-    completed_tasks, pending_tasks = await asyncio.wait(
-        module_tasks,
-        timeout=request_timeout,
-    )
-    for pending_task in pending_tasks:
-        pending_task.cancel()
-    if pending_tasks:
-        await asyncio.gather(*pending_tasks, return_exceptions=True)
 
-    results = []
-    for module_index, module_task in enumerate(module_tasks):
-        if module_task in completed_tasks:
-            completed_module = requested_modules[module_index]
-            module_name = completed_module["module_name"]
-            try:
-                module_result = module_task.result()
-            except Exception:
-                LOGGER.exception(
-                    "AI module pipeline stopped unexpectedly module=%s",
-                    module_name,
-                )
-                module_result = {
-                    "module": {
-                        "module_name": module_name,
-                        "credit_units": completed_module.get("credit_units"),
-                        "assessments": [],
-                        "comments": [],
-                    },
-                    "failure": {
-                        "module_name": module_name,
-                        "stage": "pipeline",
-                        "category": "system_failure",
-                        "message": "The AI service could not process this module.",
-                    },
-                    "models_used": [],
-                    "model_runs": [],
-                }
-            results.append(module_result)
-            continue
+def image_to_data_url(file_path):
+    """Return an IO-validated image as a Base64 data URL for Qwen.
 
-        timed_out_module = requested_modules[module_index]
-        module_name = timed_out_module["module_name"]
-        timeout_result = {
-            "module": {
-                "module_name": module_name,
-                "credit_units": timed_out_module.get("credit_units"),
-                "assessments": [],
-                "comments": [],
-            },
-            "failure": {
-                "module_name": module_name,
-                "stage": "pipeline",
-                "category": "system_failure",
-                "message": "The module exceeded the AI request time limit.",
-            },
-            "models_used": [],
-            "model_runs": [
-                {
-                    "module_name": module_name,
-                    "stage": "pipeline",
-                    "model": None,
-                    "status": "timed_out",
-                    "duration_ms": round(request_timeout * 1000, 2),
-                }
+    File type, size and readability are not checked again here because those
+    checks belong to IO Manager.
+    """
+    image_path = Path(file_path)
+    mime_type, _ = mimetypes.guess_type(image_path.name)
+    encoded_image = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded_image}"
+
+
+def create_image_messages(prompt, module_title, image_data, extra_text=None):
+    """Build the single multimodal message sent to Qwen.
+
+    The message always contains the prompt, module title and image. The
+    normalization pass also supplies the earlier interpretation memo.
+    """
+    text = f"{prompt}\n\nMODULE: {module_title}"
+    if extra_text is not None:
+        text += f"\n\nINTERPRETATION MEMO:\n{extra_text}"
+
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": image_data}},
             ],
         }
-        results.append(timeout_result)
-
-    modules = []
-    failures = []
-    models_used = []
-    model_runs = []
-    for result in results:
-        failure = result.get("failure")
-        if failure is None:
-            modules.append(result["module"])
-        else:
-            failures.append(failure)
-        result_models = result.get("models_used", [])
-        models_used.extend(result_models)
-        result_runs = result.get("model_runs", [])
-        model_runs.extend(result_runs)
-    return {
-        "modules": modules,
-        "failures": failures,
-        "models_used": _unique_text(models_used),
-        "model_runs": model_runs,
-    }
+    ]
 
 
-# Per-module extraction and evidence
-
-
-def _concurrent_request_limit(module_count):
-    default_limit = str(DEFAULT_CONCURRENT_REQUESTS)
-    configured_value = os.getenv(
-        "AI_MAX_CONCURRENT_REQUESTS",
-        default_limit,
-    )
-    try:
-        configured = int(configured_value)
-    except ValueError:
-        configured = DEFAULT_CONCURRENT_REQUESTS
-    upper_limit = min(module_count, configured, MAX_CONCURRENT_REQUESTS)
-    return max(1, upper_limit)
-
-
-async def _extract_module(
-    module,
-    repeating_schedule_data,
-    api_caller,
-    request_slots,
-):
-    """Run precheck, context extraction, and reasoning for one module."""
-    module_name = module["module_name"]
-    images = module["images"]
-    documents = module["documents"]
-    api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
-    if api_caller is None and not api_key:
-        return {
-            "module": {
-                "module_name": module_name,
-                "credit_units": module.get("credit_units"),
-                "assessments": [],
-                "comments": [],
-            },
-            "failure": {
-                "module_name": module_name,
-                "stage": "configuration",
-                "category": "system_failure",
-                "message": "The AI service is not configured.",
-            },
-            "models_used": [],
-            "model_runs": [],
-        }
-
-    models_used = []
-    model_runs = []
-    current_stage = "precheck"
-    current_model = None
-    stage_started_at = None
-    stage_in_progress = False
-
-    try:
-        accepted_images = images
-        precheck_result = None
-        if images:
-            precheck_model = os.getenv("AI_PRECHECK_MODEL", PRECHECK_MODEL)
-            precheck_prompt = _format_precheck_prompt(module, images)
-            current_model = precheck_model
-            async with request_slots:
-                stage_started_at = time.perf_counter()
-                stage_in_progress = True
-                precheck_result = await _run_model_stage(
-                    stage="precheck",
-                    prompt=precheck_prompt,
-                    images=images,
-                    api_key=api_key,
-                    model=precheck_model,
-                    system_prompt=PRECHECK_SYSTEM_PROMPT,
-                    tool_name="submit_image_precheck",
-                    tool_description="Classify the relevance of each supplied image.",
-                    schema=_precheck_schema(),
-                    max_tokens=4_096,
-                    reasoning_effort="none",
-                    api_caller=api_caller,
-                )
-            stage_in_progress = False
-            stage_finished_at = time.perf_counter()
-            stage_duration_ms = round(
-                (stage_finished_at - stage_started_at) * 1000,
-                2,
-            )
-            model_runs.append(
-                {
-                    "module_name": module_name,
-                    "stage": current_stage,
-                    "model": current_model,
-                    "status": "completed",
-                    "duration_ms": stage_duration_ms,
-                }
-            )
-            LOGGER.info(
-                "AI stage completed module=%s stage=%s model=%s duration_ms=%s",
-                module_name,
-                current_stage,
-                current_model,
-                stage_duration_ms,
-            )
-            models_used.append(precheck_model)
-            accepted_images = _accepted_images(
-                images,
-                precheck_result,
-            )
-
-            if not accepted_images:
-                raw_comments = precheck_result.get("comments")
-                comments = _text_list(raw_comments)
-                if not comments:
-                    comments = ["The supplied images are not relevant to this module schedule."]
-                return {
-                    "module": {
-                        "module_name": module_name,
-                        "credit_units": module.get("credit_units"),
-                        "assessments": [],
-                        "comments": [],
-                    },
-                    "failure": {
-                        "module_name": module_name,
-                        "stage": "precheck",
-                        "category": "rejected_input",
-                        "message": comments[0],
-                    },
-                    "models_used": models_used,
-                    "model_runs": model_runs,
-                }
-
-        current_stage = "context"
-        document_text, document_comments = _read_module_documents(documents)
-        context_model = os.getenv("AI_CONTEXT_MODEL", CONTEXT_MODEL)
-        context_prompt = _format_context_prompt(
-            module,
-            accepted_images,
-            document_text,
-        )
-        current_model = context_model
-        async with request_slots:
-            stage_started_at = time.perf_counter()
-            stage_in_progress = True
-            context_result = await _run_model_stage(
-                stage="context",
-                prompt=context_prompt,
-                images=accepted_images,
-                api_key=api_key,
-                model=context_model,
-                system_prompt=CONTEXT_SYSTEM_PROMPT,
-                tool_name="submit_assessment_evidence",
-                tool_description="Submit explicit assessment evidence from the sources.",
-                schema=_context_schema(),
-                max_tokens=4_096,
-                reasoning_effort="none",
-                api_caller=api_caller,
-            )
-        stage_in_progress = False
-        stage_finished_at = time.perf_counter()
-        stage_duration_ms = round(
-            (stage_finished_at - stage_started_at) * 1000,
-            2,
-        )
-        model_runs.append(
-            {
-                "module_name": module_name,
-                "stage": current_stage,
-                "model": current_model,
-                "status": "completed",
-                "duration_ms": stage_duration_ms,
-            }
-        )
-        LOGGER.info(
-            "AI stage completed module=%s stage=%s model=%s duration_ms=%s",
-            module_name,
-            current_stage,
-            current_model,
-            stage_duration_ms,
-        )
-        models_used.append(context_model)
-
-        current_stage = "reasoning"
-        reasoning_model = os.getenv("AI_REASONING_MODEL", REASONING_MODEL)
-        reasoning_prompt = _format_reasoning_prompt(
-            module,
-            context_result,
-            repeating_schedule_data,
-        )
-        current_model = reasoning_model
-        async with request_slots:
-            stage_started_at = time.perf_counter()
-            stage_in_progress = True
-            reasoning_result = await _run_model_stage(
-                stage="reasoning",
-                prompt=reasoning_prompt,
-                images=[],
-                api_key=api_key,
-                model=reasoning_model,
-                system_prompt=REASONING_SYSTEM_PROMPT,
-                tool_name="submit_module_facts",
-                tool_description="Submit the reconciled module assessment schedule.",
-                schema=_pacing_schema(),
-                max_tokens=4_096,
-                reasoning_effort="none",
-                api_caller=api_caller,
-            )
-        stage_in_progress = False
-        stage_finished_at = time.perf_counter()
-        stage_duration_ms = round(
-            (stage_finished_at - stage_started_at) * 1000,
-            2,
-        )
-        model_runs.append(
-            {
-                "module_name": module_name,
-                "stage": current_stage,
-                "model": current_model,
-                "status": "completed",
-                "duration_ms": stage_duration_ms,
-            }
-        )
-        LOGGER.info(
-            "AI stage completed module=%s stage=%s model=%s duration_ms=%s",
-            module_name,
-            current_stage,
-            current_model,
-            stage_duration_ms,
-        )
-        models_used.append(reasoning_model)
-
-        normalized_module = _normalize_module_result(reasoning_result, module)
-        module_comments = normalized_module["comments"]
-        combined_comments = module_comments + document_comments
-        normalized_module["comments"] = _unique_text(combined_comments)
-        normalized_module["pipeline_context"] = {
-            "precheck": precheck_result,
-            "evidence": context_result,
-        }
-        return {
-            "module": normalized_module,
-            "failure": None,
-            "models_used": models_used,
-            "model_runs": model_runs,
-        }
-    except (ConnectionError, OSError, TypeError, ValueError, KeyError) as error:
-        safe_error = _safe_error(error)
-        failure_type = "model_error"
-        failure_message = "The AI service could not process this module."
-        lower_error = safe_error.lower()
-        if "timed out" in lower_error:
-            failure_type = "model_timeout"
-            failure_message = f"{current_model} timed out during {current_stage}."
-        elif "http 429" in lower_error or "rate limit" in lower_error:
-            failure_type = "rate_limit"
-            failure_message = "The AI service rate limit was reached."
-        elif "quota" in lower_error or "balance" in lower_error or "credit" in lower_error:
-            failure_type = "quota"
-            failure_message = "The AI service quota or credit is unavailable."
-        elif "valid json" in lower_error or "model response" in lower_error:
-            failure_type = "invalid_model_response"
-            failure_message = "The AI model returned an invalid response."
-        if stage_in_progress and stage_started_at is not None:
-            stage_finished_at = time.perf_counter()
-            stage_duration_ms = round(
-                (stage_finished_at - stage_started_at) * 1000,
-                2,
-            )
-            model_runs.append(
-                {
-                    "module_name": module_name,
-                    "stage": current_stage,
-                    "model": current_model,
-                    "status": "failed",
-                    "duration_ms": stage_duration_ms,
-                }
-            )
-        LOGGER.warning(
-            "AI stage failed module=%s stage=%s model=%s error=%s",
-            module_name,
-            current_stage,
-            current_model,
-            safe_error,
-        )
-        return {
-            "module": {
-                "module_name": module_name,
-                "credit_units": module.get("credit_units"),
-                "assessments": [],
-                "comments": [],
-            },
-            "failure": {
-                "module_name": module_name,
-                "stage": current_stage,
-                "category": "system_failure",
-                "failure_type": failure_type,
-                "message": failure_message,
-            },
-            "models_used": models_used,
-            "model_runs": model_runs,
-        }
-
-
-async def _run_model_stage(
-    *,
-    stage,
-    prompt,
-    images,
-    api_key,
+async def call_model(
+    client,
     model,
-    system_prompt,
-    tool_name,
-    tool_description,
-    schema,
-    max_tokens,
-    reasoning_effort,
-    api_caller,
+    messages,
+    thinking,
+    semaphore,
+    task_name,
+    json_mode=False,
 ):
-    if api_caller is not None:
-        reply = await _invoke_caller(
-            api_caller,
-            stage=stage,
-            prompt=prompt,
-            images=images,
-            model=model,
-            schema=schema,
-            reasoning_effort=reasoning_effort,
-        )
-    else:
-        reply = await _call_model(
-            prompt=prompt,
-            images=images,
-            api_key=api_key,
-            model=model,
-            system_prompt=system_prompt,
-            tool_name=tool_name,
-            tool_description=tool_description,
-            schema=schema,
-            max_tokens=max_tokens,
-            reasoning_effort=reasoning_effort,
-        )
+    """Send one Qwen request and return its non-empty text response.
 
-    parsed_reply = _parse_model_reply(
-        reply,
-        tool_name=tool_name,
-    )
-    return parsed_reply
-
-
-def _format_precheck_prompt(module, images):
-    source_lines = []
-    for image in images:
-        source_id = image["source_id"]
-        image_path = image["path"]
-        file_name = Path(image_path).name
-        source_lines.append(f"{source_id}: {file_name}")
-
-    sources = "\n".join(source_lines)
-    return (
-        f"Expected module: {module['module_name']}\n"
-        "Classify each image as relevant, irrelevant, or uncertain. An image is "
-        "relevant when it contains readable assessment names, weights, deadlines, "
-        "weeks, recurrence, or another fact needed for a module schedule.\n"
-        f"Sources:\n{sources}"
-    )
-
-
-def _accepted_images(images, precheck_result):
-    image_results = precheck_result.get("images")
-    if not isinstance(image_results, list):
-        raise ValueError("The precheck result did not contain an images list.")
-    if len(image_results) != len(images):
-        raise ValueError("The precheck did not classify every supplied image.")
-
-    images_by_source_id = {}
-    for image in images:
-        source_id = image["source_id"]
-        images_by_source_id[source_id] = image
-
-    accepted_images = []
-    seen_source_ids = set()
-    for image_result in image_results:
-        if not isinstance(image_result, dict):
-            raise ValueError("The precheck returned an invalid image result.")
-
-        source_id = image_result.get("source_id")
-        status = image_result.get("status")
-        if status not in {"relevant", "irrelevant", "uncertain"}:
-            raise ValueError("The precheck returned an invalid relevance status.")
-        if source_id not in images_by_source_id:
-            raise ValueError("The precheck returned an invalid source ID.")
-        if source_id in seen_source_ids:
-            raise ValueError("The precheck returned a duplicate source ID.")
-        seen_source_ids.add(source_id)
-
-        if status == "irrelevant":
-            continue
-
-        accepted_image = images_by_source_id[source_id]
-        accepted_images.append(accepted_image)
-
-    return accepted_images
-
-
-def _read_module_documents(documents):
-    document_parts = []
-    comments = []
-    remaining_chars = MAX_DOCUMENT_CHARS
-    for document in documents:
-        file_path = document["path"]
-        document_type = document["document_type"]
-        path = Path(file_path)
-        try:
-            text = _read_document_text(path, document_type)
-            if not text.strip():
-                comments.append(f"{path.name} did not contain readable text.")
-                continue
-            excerpt = text[:remaining_chars]
-            if excerpt:
-                document_parts.append(f"--- {path.name} ---\n{excerpt}")
-                remaining_chars -= len(excerpt)
-        except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as error:
-            safe_error = _safe_error(error)
-            LOGGER.warning(
-                "Could not read uploaded document %s: %s",
-                path.name,
-                safe_error,
-            )
-            comments.append(f"{path.name} could not be read as assessment evidence.")
-
-    document_text = "\n".join(document_parts)
-    return document_text, comments
-
-
-def _format_context_prompt(module, images, document_text):
-    image_sources = []
-    for image in images:
-        source_id = image["source_id"]
-        image_path = image["path"]
-        file_name = Path(image_path).name
-        image_sources.append(f"{source_id}: {file_name}")
-
-    image_source_text = "\n".join(image_sources)
-    return (
-        f"Module: {module['module_name']}\n"
-        f"Credit units: {module.get('credit_units')}\n"
-        f"User context: {module.get('additional_context') or 'None'}\n"
-        "Extract only explicit assessment evidence. Give each image evidence item "
-        "the source ID listed below. Preserve contradictions as "
-        "separate evidence items. Do not produce a final schedule.\n"
-        f"Image sources:\n{image_source_text or 'None'}\n"
-        f"Document text:\n{document_text or 'None'}"
-    )
-
-
-def _format_reasoning_prompt(module, context_result, repeating_schedule_data):
-    evidence_text = json.dumps(context_result, separators=(",", ":"))
-    retry_text = "None"
-    if repeating_schedule_data is not None:
-        retry_text = json.dumps(repeating_schedule_data, separators=(",", ":"))
-
-    return (
-        f"Module: {module['module_name']}\n"
-        f"Credit units: {module.get('credit_units')}\n"
-        f"User context: {module.get('additional_context') or 'None'}\n"
-        f"Extracted evidence: {evidence_text}\n"
-        f"Existing retry schedule: {retry_text}\n"
-        "Reconcile duplicates and conflicts, interpret recurrence and shared weights, "
-        "and return the most defensible schedule. Use null rather than guessing."
-    )
-
-
-def _read_document_text(path, document_type):
-    if document_type == "text":
-        return path.read_text(encoding="utf-8", errors="replace")
-    if document_type == "pdf":
-        try:
-            from pypdf import PdfReader
-        except ImportError as error:
-            raise RuntimeError("PDF support is unavailable") from error
-        return "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
-    if document_type == "docx":
-        with zipfile.ZipFile(path) as archive:
-            document_xml = archive.read("word/document.xml")
-            root = ElementTree.fromstring(document_xml)
-        return "\n".join(text for text in root.itertext() if text.strip())
-    raise ValueError("Unsupported document type")
-
-
-# Model request and response contract
-
-
-async def _call_model(
-    *,
-    prompt,
-    images,
-    api_key,
-    model,
-    system_prompt,
-    tool_name,
-    tool_description,
-    schema,
-    max_tokens,
-    reasoning_effort,
-):
-    user_content = _build_user_content(prompt, images)
-    tool_choice = "auto"
-    if reasoning_effort == "none":
-        tool_choice = {
-            "type": "function",
-            "function": {"name": tool_name},
-        }
-
+    ``semaphore`` enforces the pipeline-wide concurrency limit. Timing starts
+    after the semaphore is acquired, so logs measure the HTTP request rather
+    than queue time. ``json_mode`` is used only when the provider supports it.
+    """
     request = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0,
-        "max_tokens": max_tokens,
-        "reasoning_effort": reasoning_effort,
-        "tools": [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": tool_description,
-                    "parameters": schema,
-                },
-            }
-        ],
-        "tool_choice": tool_choice,
+        "messages": messages,
+        "extra_body": {"enable_thinking": thinking},
     }
+    if json_mode:
+        request["response_format"] = {"type": "json_object"}
 
-    raw_timeout = os.getenv(
-        "AI_MODEL_TIMEOUT_SECONDS",
-        str(DEFAULT_MODEL_TIMEOUT_SECONDS),
-    )
-    try:
-        model_timeout = float(raw_timeout)
-    except ValueError:
-        model_timeout = DEFAULT_MODEL_TIMEOUT_SECONDS
-    if model_timeout <= 0:
-        model_timeout = DEFAULT_MODEL_TIMEOUT_SECONDS
+    async with semaphore:
+        LOGGER.info("HTTP task started: %s [%s]", task_name, model)
+        started_at = time.perf_counter()
+        try:
+            response = await client.chat.completions.create(**request)
+        except Exception:
+            elapsed_seconds = time.perf_counter() - started_at
+            LOGGER.info(
+                "HTTP task failed: %s [%s] after %.2f seconds",
+                task_name,
+                model,
+                elapsed_seconds,
+            )
+            raise
 
-    raw_retries = os.getenv(
-        "AI_MODEL_RETRIES",
-        str(DEFAULT_MODEL_RETRIES),
-    )
-    try:
-        model_retries = int(raw_retries)
-    except ValueError:
-        model_retries = DEFAULT_MODEL_RETRIES
-    model_retries = max(0, min(model_retries, 2))
-
-    client = AsyncOpenAI(
-        api_key=api_key,
-        base_url=os.getenv("DASHSCOPE_BASE_URL", DASHSCOPE_BASE_URL).strip()
-        or DASHSCOPE_BASE_URL,
-        timeout=model_timeout,
-        max_retries=model_retries,
-    )
-    try:
-        completion = await client.chat.completions.create(**request)
-    except OpenAIError as error:
-        status = getattr(error, "status_code", None)
-        status_text = f" (HTTP {status})" if status else ""
-        raise ConnectionError(
-            f"Alibaba Model Studio request failed{status_text}: {error}"
-        ) from error
-    finally:
-        await client.close()
-    if not completion.choices:
-        raise ValueError("Alibaba Model Studio returned no model message.")
-
-    usage = getattr(completion, "usage", None)
-    if usage is not None:
-        prompt_tokens = getattr(usage, "prompt_tokens", None)
-        completion_tokens = getattr(usage, "completion_tokens", None)
-        total_tokens = getattr(usage, "total_tokens", None)
+        elapsed_seconds = time.perf_counter() - started_at
         LOGGER.info(
-            "%s token usage: input=%s output=%s total=%s",
+            "HTTP task completed: %s [%s] in %.2f seconds",
+            task_name,
             model,
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
+            elapsed_seconds,
         )
-    return completion.choices[0].message.model_dump(exclude_none=True)
 
-
-def _build_user_content(prompt, images):
-    content = [{"type": "text", "text": prompt}]
-    for image in images:
-        image_path = image["path"]
-        media_type = image["media_type"]
-        path = Path(image_path)
-        image_bytes = path.read_bytes()
-        encoded_bytes = base64.b64encode(image_bytes)
-        encoded = encoded_bytes.decode("ascii")
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": (
-                        f"data:{media_type};base64,"
-                        f"{encoded}"
-                    )
-                },
-            }
-        )
-    return content
-
-
-def _parse_model_reply(reply, *, tool_name):
-    if isinstance(reply, dict) and "tool_calls" not in reply and "content" not in reply:
-        return reply
-    if not isinstance(reply, dict):
-        reply_text = str(reply)
-        return _parse_json_object(reply_text)
-    raw_tool_calls = reply.get("tool_calls")
-    tool_calls = _list_or_empty(raw_tool_calls)
-    for tool_call in tool_calls:
-        function = (
-            tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
-        )
-        if function.get("name") == tool_name:
-            arguments = function.get("arguments", "")
-            return _parse_json_object(arguments)
-    content = reply.get("content", "")
-    if isinstance(content, list):
-        content = "".join(
-            part.get("text", "") for part in content if isinstance(part, dict)
-        )
-    return _parse_json_object(content)
-
-
-def _parse_json_object(text):
-    if not isinstance(text, str):
-        raise ValueError("The model response was not text.")
     try:
-        value = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise ValueError("The model did not return valid JSON.") from error
-    if isinstance(value, dict):
+        content = response.choices[0].message.content
+    except (AttributeError, IndexError) as error:
+        raise ValueError("Model returned no readable content.") from error
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Model returned no readable content.")
+    return content.strip()
+
+
+def parse_json_content(content):
+    """Decode model text as JSON and return the resulting Python value.
+
+    A single surrounding Markdown fence is accepted because models sometimes
+    add it despite the prompt. Any other malformed output is a hard failure.
+    """
+    stripped = content.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        lines = stripped.splitlines()
+        stripped = "\n".join(lines[1:-1]).strip()
+
+    try:
+        return json.loads(stripped)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("Model returned invalid JSON.") from error
+
+
+async def check_relevance(client, module_title, image_data, semaphore):
+    """Return Qwen Flash's relevance decision for one module image.
+
+    This inexpensive, non-thinking request prevents unrelated images from
+    reaching the two reasoning passes.
+    """
+    content = await call_model(
+        client,
+        RELEVANCE_MODEL,
+        create_image_messages(RELEVANCE_PROMPT, module_title, image_data),
+        thinking=False,
+        semaphore=semaphore,
+        task_name=f"{module_title} relevance",
+        json_mode=True,
+    )
+    relevance = parse_json_content(content)
+    if not isinstance(relevance, dict):
+        raise ValueError("Relevance model returned an invalid response.")
+    return relevance
+
+
+async def interpret_assessments(client, module_title, image_data, semaphore):
+    """Return a free-form evidence memo from the first reasoning pass.
+
+    Keeping this pass outside the final schema gives Qwen room to understand
+    multiplicity, hierarchy and uncertainty before normalization.
+    """
+    return await call_model(
+        client,
+        REASONING_MODEL,
+        create_image_messages(INTERPRETATION_PROMPT, module_title, image_data),
+        thinking=True,
+        semaphore=semaphore,
+        task_name=f"{module_title} interpretation",
+    )
+
+
+async def normalize_assessments(
+    client,
+    module_title,
+    image_data,
+    interpretation,
+    semaphore,
+):
+    """Return structured assessment prototypes from the evidence memo.
+
+    Qwen rechecks the image while converting the memo. Local functions later
+    validate and expand these prototypes into the final scheduler payload.
+    """
+    content = await call_model(
+        client,
+        REASONING_MODEL,
+        create_image_messages(
+            NORMALIZATION_PROMPT,
+            module_title,
+            image_data,
+            extra_text=interpretation,
+        ),
+        thinking=True,
+        semaphore=semaphore,
+        task_name=f"{module_title} normalization",
+    )
+    normalized = parse_json_content(content)
+    if not isinstance(normalized, dict):
+        raise ValueError("Normalization model returned an invalid response.")
+    return normalized
+
+
+def append_follow_up(follow_ups, assessment, field, message):
+    """Append one soft comment unless its assessment and field already exist.
+
+    Follow-ups remain module metadata; they never enter the hard-error list.
+    """
+    target = assessment.casefold() if isinstance(assessment, str) else None
+    for follow_up in follow_ups:
+        existing = follow_up.get("assessment")
+        existing_target = existing.casefold() if isinstance(existing, str) else None
+        if existing_target == target and follow_up.get("field") == field:
+            return
+
+    follow_ups.append(
+        {
+            "assessment": assessment,
+            "field": field,
+            "message": message,
+        }
+    )
+
+
+def normalize_weight(value, assessment, field, follow_ups):
+    """Return a numeric weight or ``None`` when the value is not usable.
+
+    A malformed value is retained as a soft follow-up so the module can still
+    continue through the pipeline.
+    """
+    if value is None or type(value) in (int, float):
         return value
-    raise ValueError("The model JSON response was not an object.")
+
+    append_follow_up(
+        follow_ups,
+        assessment,
+        field,
+        "The source weight could not be represented as a number.",
+    )
+    return None
 
 
-def _strict_object(properties, *, required=None):
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": list(properties) if required is None else list(required),
-        "additionalProperties": False,
+def normalize_schedule(schedule, assessment, follow_ups, required=True):
+    """Return a schedule dictionary with the fields Logic Manager expects.
+
+    Invalid combinations become ``kind: unknown``. When ``required`` is false,
+    an unknown schedule is allowed because structural group records need no
+    calendar entry.
+    """
+    if not isinstance(schedule, dict):
+        schedule = {}
+
+    normalized = {
+        "kind": schedule.get("kind", "unknown"),
+        "week": schedule.get("week"),
+        "start_week": schedule.get("start_week"),
+        "end_week": schedule.get("end_week"),
+        "date": schedule.get("date"),
+        "day": schedule.get("day"),
+        "raw": schedule.get("raw"),
+    }
+    if normalized["kind"] not in SCHEDULE_KINDS:
+        normalized["kind"] = "unknown"
+
+    kind = normalized["kind"]
+    if kind == "week" and type(normalized["week"]) is not int:
+        normalized["kind"] = "unknown"
+    elif kind == "week_range" and (
+        type(normalized["start_week"]) is not int
+        or type(normalized["end_week"]) is not int
+    ):
+        normalized["kind"] = "unknown"
+    elif kind == "date" and not isinstance(normalized["date"], str):
+        normalized["kind"] = "unknown"
+    elif kind == "recurring" and not (
+        isinstance(normalized["day"], str)
+        or isinstance(normalized["raw"], str)
+    ):
+        normalized["kind"] = "unknown"
+
+    if normalized["kind"] == "unknown" and required:
+        append_follow_up(
+            follow_ups,
+            assessment,
+            "schedule",
+            "No complete schedulable week, date, or recurrence was stated.",
+        )
+    return normalized
+
+
+def make_assessment_id(module_title, assessment_type, position):
+    """Return a stable ID from module, type and one-based group position.
+
+    IDs are created locally so model wording cannot introduce random or unsafe
+    identifiers into frontend relationships.
+    """
+    module_code = re.sub(r"[^A-Z0-9]+", "-", module_title.upper()).strip("-")
+    type_code = re.sub(
+        r"[^A-Z0-9]+", "-", assessment_type.upper()
+    ).strip("-")
+    return f"{module_code}-{type_code or 'OTHER'}-{position:02d}"
+
+
+def prepare_follow_ups(raw_follow_ups):
+    """Return deduplicated model follow-ups that match the metadata contract.
+
+    Unknown fields, malformed entries and messages without text are ignored.
+    """
+    if not isinstance(raw_follow_ups, list):
+        return []
+
+    follow_ups = []
+    for follow_up in raw_follow_ups:
+        if not isinstance(follow_up, dict):
+            continue
+        field = follow_up.get("field")
+        message = follow_up.get("message")
+        assessment = follow_up.get("assessment")
+        if (
+            field not in FOLLOW_UP_FIELDS
+            or not isinstance(message, str)
+        ):
+            continue
+        if not isinstance(assessment, str):
+            assessment = None
+        append_follow_up(follow_ups, assessment, field, message)
+    return follow_ups
+
+
+def prepare_group_specs(raw_groups, follow_ups):
+    """Return validated intermediate groups keyed by canonical assessment type.
+
+    Groups of the same type are merged in source order. Conflicting group
+    weights are cleared and recorded as a soft follow-up instead of guessed.
+    """
+    if not isinstance(raw_groups, list):
+        raise ValueError("Normalization response has no assessment type list.")
+
+    group_order = []
+    group_specs = {}
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, dict):
+            raise ValueError("Normalization response contains an invalid group.")
+        raw_type = raw_group.get("type")
+        prototypes = raw_group.get("assessments")
+        if not isinstance(raw_type, str) or not isinstance(prototypes, list):
+            raise ValueError("Normalization response contains an invalid group.")
+
+        assessment_type = re.sub(
+            r"[^a-z0-9]+", "_", raw_type.lower()
+        ).strip("_") or "other"
+        assessment_type = TYPE_ALIASES.get(assessment_type, assessment_type)
+        if assessment_type not in ASSESSMENT_TYPES:
+            append_follow_up(
+                follow_ups,
+                raw_type,
+                "type",
+                "The assessment type was unclear and was classified as other.",
+            )
+            assessment_type = "other"
+        group_weight = normalize_weight(
+            raw_group.get("group_weight_percent"),
+            assessment_type,
+            "group_weight_percent",
+            follow_ups,
+        )
+        group_scope = raw_group.get("group_weight_scope", "unknown")
+        if group_scope not in WEIGHT_SCOPES:
+            group_scope = "unknown"
+        group_scope_name = raw_group.get("group_weight_scope_name")
+        if not isinstance(group_scope_name, str):
+            group_scope_name = None
+
+        if assessment_type not in group_specs:
+            group_order.append(assessment_type)
+            group_specs[assessment_type] = {
+                "type": assessment_type,
+                "group_weight_percent": group_weight,
+                "group_weight_scope": group_scope,
+                "group_weight_scope_name": group_scope_name,
+                "prototypes": list(prototypes),
+            }
+            continue
+
+        existing = group_specs[assessment_type]
+        existing["prototypes"].extend(prototypes)
+        if existing["group_weight_percent"] != group_weight:
+            existing["group_weight_percent"] = None
+            existing["group_weight_scope"] = "unknown"
+            existing["group_weight_scope_name"] = None
+            append_follow_up(
+                follow_ups,
+                assessment_type,
+                "group_weight_percent",
+                "Multiple conflicting group weights were returned for this type.",
+            )
+
+    return [group_specs[assessment_type] for assessment_type in group_order]
+
+
+def build_module_output(module_title, credit, normalized):
+    """Convert normalized prototypes into one schedule-ready module.
+
+    This local pass expands repeated work, protects group weights, creates IDs,
+    links parent records and attaches soft comments. Invalid core structures
+    raise ``ValueError`` so only that module is removed.
+    """
+    # Step 1: normalize module-level source coverage and factual notes.
+    coverage = normalized.get("source_coverage")
+    if not isinstance(coverage, dict):
+        coverage = {}
+    coverage_status = coverage.get("status", "unclear")
+    if coverage_status not in COVERAGE_STATUSES:
+        coverage_status = "unclear"
+    coverage_comment = coverage.get("comment")
+    if not isinstance(coverage_comment, str):
+        coverage_comment = None
+    source_coverage = {
+        "status": coverage_status,
+        "comment": coverage_comment,
     }
 
-
-def _string_list(max_items=None):
-    schema = {"type": "array", "items": {"type": "string"}}
-    if max_items is not None:
-        schema["maxItems"] = max_items
-    return schema
-
-
-def _precheck_schema():
-    image_result = _strict_object(
-        {
-            "source_id": {"type": "string"},
-            "status": {
-                "type": "string",
-                "enum": ["relevant", "irrelevant", "uncertain"],
-            },
-            "comment": {"type": "string"},
-        }
-    )
-    return _strict_object(
-        {
-            "images": {"type": "array", "items": image_result},
-            "comments": _string_list(3),
-        }
+    notes = normalized.get("notes")
+    if not isinstance(notes, list):
+        notes = []
+    notes = [note for note in notes if isinstance(note, str)]
+    follow_ups = prepare_follow_ups(normalized.get("follow_ups"))
+    group_specs = prepare_group_specs(
+        normalized.get("assessment_types"),
+        follow_ups,
     )
 
+    # Step 2: expand each model prototype into concrete assessment records.
+    assessment_types = []
+    name_lookup = {}
+    pending_parents = []
+    for group_spec in group_specs:
+        assessment_type = group_spec["type"]
+        assessments = []
+        position = 0
+        for prototype in group_spec["prototypes"]:
+            if not isinstance(prototype, dict):
+                raise ValueError("Normalization response contains an invalid item.")
+            base_name = prototype.get("name")
+            if not isinstance(base_name, str) or not base_name.strip():
+                raise ValueError("Normalization response contains an unnamed item.")
+            base_name = base_name.strip()
 
-def _context_schema():
-    evidence_item = _strict_object(
-        {
-            "source_id": {"type": "string"},
-            "evidence_text": {"type": "string"},
-            "assessment_hint": {"type": ["string", "null"]},
-            "weightage_seen": {"type": ["number", "null"]},
-            "timing_seen": {"type": ["string", "null"]},
-            "recurrence_seen": {"type": ["string", "null"]},
-        }
-    )
-    return _strict_object(
-        {
-            "evidence": {"type": "array", "items": evidence_item},
-            "unclear_evidence": _string_list(5),
-            "comments": _string_list(3),
-        }
-    )
+            count = prototype.get("count", 1)
+            if type(count) is not int or count < 1:
+                count = 1
+                append_follow_up(
+                    follow_ups,
+                    base_name,
+                    "count",
+                    "The number of occurrences was unclear; one was retained.",
+                )
 
+            record_role = prototype.get("record_role", "assessment")
+            if record_role not in RECORD_ROLES:
+                record_role = "assessment"
+            weight = normalize_weight(
+                prototype.get("weight_percent"),
+                base_name,
+                "weight_percent",
+                follow_ups,
+            )
+            weight_scope = prototype.get("weight_scope", "unknown")
+            if weight_scope not in WEIGHT_SCOPES:
+                weight_scope = "unknown"
+            if count > 1 and group_spec["group_weight_percent"] is not None:
+                # The image states a repeated-group total, not a safe per-item
+                # value. Never persist a model's arithmetic division as fact.
+                weight = None
+            weight_scope_name = prototype.get("weight_scope_name")
+            if not isinstance(weight_scope_name, str):
+                weight_scope_name = None
+            parent_name = prototype.get("parent_assessment")
+            if not isinstance(parent_name, str):
+                parent_name = None
+            details = prototype.get("details")
+            if not isinstance(details, str):
+                details = None
 
-def _pacing_schema():
-    nullable_number = {"type": ["number", "null"]}
-    nullable_integer = {"type": ["integer", "null"]}
-    nullable_string = {"type": ["string", "null"]}
-    recurrence = _strict_object(
-        {
-            "frequency": nullable_string,
-            "weeks": {"type": "array", "items": {"type": "integer"}},
-            "start_week": nullable_integer,
-            "end_week": nullable_integer,
-            "every_n_weeks": nullable_integer,
-        }
-    )
-    recurrence["type"] = ["object", "null"]
-    assessment = _strict_object(
-        {
-            "name": {"type": "string"},
-            "type": {"type": "string"},
-            "classification": {
-                "type": "string",
-                "enum": ["graded", "aggregate", "bonus", "ungraded", "uncertain"],
-            },
-            "weightage_percent": nullable_number,
-            "weightage_scope": {
-                "type": "string",
-                "enum": ["total", "per_occurrence", "unknown"],
-            },
-            "due_date": nullable_string,
-            "due_week": nullable_integer,
-            "recurring": {"type": "boolean"},
-            "recurrence": recurrence,
-            "spans_multiple_weeks": {"type": "boolean"},
-            "start_week": nullable_integer,
-            "end_week": nullable_integer,
-            "confidence": nullable_number,
-            "comments": _string_list(1),
-            "missing_information": _string_list(1),
-            "assumptions": _string_list(1),
-        }
-    )
-    return _strict_object(
-        {
-            "assessments": {"type": "array", "items": assessment},
-            "comments": _string_list(3),
-        }
-    )
+            follow_up_target = base_name
+            schedule = normalize_schedule(
+                prototype.get("schedule"),
+                follow_up_target,
+                follow_ups,
+                required=record_role == "assessment",
+            )
+            if (
+                count > 1
+                and schedule["kind"] == "recurring"
+                and (
+                    type(schedule["start_week"]) is not int
+                    or type(schedule["end_week"]) is not int
+                )
+            ):
+                append_follow_up(
+                    follow_ups,
+                    follow_up_target,
+                    "schedule",
+                    "The recurring pattern does not state the full occurrence range.",
+                )
+            if (
+                weight is None
+                and group_spec["group_weight_percent"] is None
+                and record_role == "assessment"
+            ):
+                append_follow_up(
+                    follow_ups,
+                    follow_up_target,
+                    "weight_percent",
+                    "No assessment weight was stated.",
+                )
 
+            for occurrence in range(1, count + 1):
+                position += 1
+                name = (
+                    f"{base_name} {occurrence}"
+                    if count > 1
+                    else base_name
+                )
+                assessment_id = make_assessment_id(
+                    module_title,
+                    assessment_type,
+                    position,
+                )
+                assessment = {
+                    "assessment_id": assessment_id,
+                    "name": name,
+                    "record_role": record_role,
+                    "occurrence_number": occurrence,
+                    "occurrence_count": count,
+                    "weight_percent": weight,
+                    "weight_scope": weight_scope,
+                    "weight_scope_name": weight_scope_name,
+                    "schedule": dict(schedule),
+                    "parent_assessment_id": None,
+                    "details": details,
+                }
+                assessments.append(assessment)
+                name_lookup.setdefault(name.casefold(), []).append(assessment_id)
+                pending_parents.append((assessment, parent_name))
 
-# AI result normalization
-
-
-def _normalize_module_result(reply, supplied_module):
-    if not isinstance(reply, dict):
-        raise ValueError("The model result was not an object.")
-
-    raw_assessments = reply.get("assessments", [])
-    raw_comments = reply.get("comments")
-    comments = _text_list(raw_comments)
-    if not isinstance(raw_assessments, list):
-        raise ValueError("The model result did not contain an assessment list.")
-
-    assessments = []
-    for index, raw in enumerate(raw_assessments, start=1):
-        if not isinstance(raw, dict):
-            raise ValueError(f"Assessment {index} was not an object.")
-        name = str(raw.get("name") or "").strip()
-        if not name:
-            raise ValueError(f"Assessment {index} has no title.")
-
-        classification = raw.get("classification")
-        allowed_classifications = {
-            "graded",
-            "aggregate",
-            "bonus",
-            "ungraded",
-            "uncertain",
-        }
-        if classification not in allowed_classifications:
-            raise ValueError(f"Assessment {index} has an invalid classification.")
-
-        raw_weight = raw.get("weightage_percent")
-        weight = _number_or_none(raw_weight)
-        raw_item_comments = raw.get("comments")
-        item_comments = _text_list(raw_item_comments)
-        raw_missing_information = raw.get("missing_information")
-        missing_information = _text_list(raw_missing_information)
-        missing = _unique_text(missing_information)
-        if weight is not None and not 0 <= weight <= 100:
-            raise ValueError(f"Assessment {index} has an invalid weightage.")
-
-        raw_due_week = raw.get("due_week")
-        due_week = _week_or_none(raw_due_week)
-
-        raw_recurrence = raw.get("recurrence")
-        recurrence = _normalize_recurrence(raw_recurrence)
-        recurring = raw.get("recurring")
-        if not isinstance(recurring, bool):
-            raise ValueError(f"Assessment {index} has invalid recurrence status.")
-
-        spans_multiple_weeks = raw.get("spans_multiple_weeks")
-        if not isinstance(spans_multiple_weeks, bool):
-            raise ValueError(f"Assessment {index} has invalid duration status.")
-
-        raw_confidence = raw.get("confidence")
-        confidence = _number_or_none(raw_confidence)
-        if confidence is not None and not 0 <= confidence <= 1:
-            raise ValueError(f"Assessment {index} has invalid confidence.")
-        raw_scope = str(raw.get("weightage_scope") or "").strip().lower()
-        allowed_scopes = {"total", "per_occurrence", "unknown"}
-        if raw_scope not in allowed_scopes:
-            raise ValueError(f"Assessment {index} has an invalid weightage scope.")
-
-        raw_start_week = raw.get("start_week")
-        start_week = _week_or_none(raw_start_week)
-        raw_end_week = raw.get("end_week")
-        end_week = _week_or_none(raw_end_week)
-        raw_assumptions = raw.get("assumptions")
-        assumptions = _text_list(raw_assumptions)
-        unique_assumptions = _unique_text(assumptions)
-        assessment_type = str(raw.get("type") or "assessment")
-        assessment_type = assessment_type.strip().lower()
-        raw_due_date = raw.get("due_date")
-        due_date = str(raw_due_date or "").strip() or None
-
-        assessment = {
-            "name": name,
+        group = {
             "type": assessment_type,
-            "classification": classification,
-            "weightage_percent": weight,
-            "weightage_scope": raw_scope,
-            "due_date": due_date,
-            "due_week": due_week,
-            "recurring": recurring,
-            "recurrence": recurrence,
-            "spans_multiple_weeks": spans_multiple_weeks,
-            "start_week": start_week,
-            "end_week": end_week,
-            "confidence": confidence,
-            "comments": _unique_text(item_comments),
-            "missing_information": missing,
-            "assumptions": unique_assumptions[:1],
+            "declared_count": len(assessments),
+            "group_weight_percent": group_spec["group_weight_percent"],
+            "group_weight_scope": group_spec["group_weight_scope"],
+            "group_weight_scope_name": group_spec["group_weight_scope_name"],
+            "assessments": assessments,
         }
-        assessments.append(assessment)
+        assessment_types.append(group)
+
+        if (
+            len(assessments) > 1
+            and group["group_weight_percent"] is not None
+            and all(item["weight_percent"] is None for item in assessments)
+        ):
+            append_follow_up(
+                follow_ups,
+                assessment_type,
+                "weight_percent",
+                "The group total is known, but individual weights are not stated.",
+            )
+
+    # Step 3: link children only when the parent name resolves to one record.
+    for assessment, parent_name in pending_parents:
+        if parent_name is None:
+            continue
+        parent_ids = name_lookup.get(parent_name.casefold(), [])
+        if len(parent_ids) == 1:
+            assessment["parent_assessment_id"] = parent_ids[0]
+        else:
+            append_follow_up(
+                follow_ups,
+                assessment["name"],
+                "parent_assessment_id",
+                f"Parent assessment '{parent_name}' could not be linked uniquely.",
+            )
+
+    # Step 4: a source-explicit schedule is authoritative. Remove model
+    # questions that second-guess it or demand dates for structural groups.
+    records_by_name = {}
+    for group in assessment_types:
+        for assessment in group["assessments"]:
+            records_by_name.setdefault(
+                assessment["name"].casefold(), []
+            ).append(assessment)
+    resolved_follow_ups = []
+    for follow_up in follow_ups:
+        assessment_name = follow_up.get("assessment")
+        records = (
+            records_by_name.get(assessment_name.casefold(), [])
+            if isinstance(assessment_name, str)
+            else []
+        )
+        schedule_is_resolved = (
+            follow_up.get("field") == "schedule"
+            and len(records) == 1
+            and (
+                records[0]["record_role"] == "group"
+                or records[0]["schedule"]["kind"] != "unknown"
+            )
+        )
+        if not schedule_is_resolved:
+            resolved_follow_ups.append(follow_up)
+    follow_ups = resolved_follow_ups
+
+    # Step 5: add module-level comments and connect comments to stable IDs.
+    if not assessment_types:
+        append_follow_up(
+            follow_ups,
+            None,
+            "assessment_types",
+            "No schedulable assessments could be extracted from this source.",
+        )
+    if coverage_status != "appears_complete":
+        append_follow_up(
+            follow_ups,
+            None,
+            "source_coverage",
+            coverage_comment or "The visible assessment source may be incomplete.",
+        )
+
+    for follow_up in follow_ups:
+        assessment_name = follow_up.get("assessment")
+        assessment_ids = (
+            name_lookup.get(assessment_name.casefold(), [])
+            if isinstance(assessment_name, str)
+            else []
+        )
+        follow_up["assessment_id"] = (
+            assessment_ids[0] if len(assessment_ids) == 1 else None
+        )
 
     return {
-        "module_name": supplied_module["module_name"],
-        "credit_units": supplied_module.get("credit_units"),
-        "assessments": assessments,
-        "comments": _unique_text(comments),
+        "module_title": module_title,
+        "credit": credit,
+        "source_coverage": source_coverage,
+        "assessment_types": assessment_types,
+        "notes": notes,
+        "follow_ups": follow_ups,
     }
 
 
-def _normalize_recurrence(value):
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise ValueError("Assessment recurrence was not an object or null.")
-    raw_weeks = value.get("weeks")
-    if not isinstance(raw_weeks, list):
-        raise ValueError("Assessment recurrence weeks were not a list.")
+async def process_module(module, client, semaphore):
+    """Process one IO-validated module and return ``(module, error)``.
 
-    weeks = []
-    for raw_week in raw_weeks:
-        week = _week_or_none(raw_week)
-        weeks.append(week)
+    The three AI requests run in order for this module. Expected and unexpected
+    failures are converted to one hard-error string so other modules continue.
+    """
+    module_title = module["module_title"]
+    LOGGER.info("AI Manager processing %s", module_title)
 
-    raw_start_week = value.get("start_week")
-    start_week = _week_or_none(raw_start_week)
-    raw_end_week = value.get("end_week")
-    end_week = _week_or_none(raw_end_week)
-    raw_interval = value.get("every_n_weeks")
-    every_n_weeks = _week_or_none(raw_interval)
-
-    return {
-        "frequency": str(value.get("frequency") or "").strip() or None,
-        "weeks": weeks,
-        "start_week": start_week,
-        "end_week": end_week,
-        "every_n_weeks": every_n_weeks,
-    }
-
-
-# Small shared helpers
-
-
-async def _invoke_caller(caller, **arguments):
-    """Accept native async callers while retaining simple synchronous test fakes."""
-    result = caller(**arguments)
-    return await result if inspect.isawaitable(result) else result
-
-
-def _require_no_running_loop(sync_name, async_name):
     try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    raise RuntimeError(
-        f"{sync_name} cannot run inside an active event loop; await {async_name} instead."
+        image_data = image_to_data_url(module["stored_file_path"])
+        relevance = await check_relevance(
+            client,
+            module_title,
+            image_data,
+            semaphore,
+        )
+        if relevance.get("relevant") is not True:
+            reason = relevance.get("reason", "Image is not assessment-related.")
+            failure = format_ai_error(module_title, reason)
+            LOGGER.warning("%s", failure)
+            return None, failure
+
+        interpretation = await interpret_assessments(
+            client,
+            module_title,
+            image_data,
+            semaphore,
+        )
+        normalized = await normalize_assessments(
+            client,
+            module_title,
+            image_data,
+            interpretation,
+            semaphore,
+        )
+        module_output = build_module_output(
+            module_title,
+            module["credit"],
+            normalized,
+        )
+        LOGGER.info("AI Manager completed %s", module_title)
+        return module_output, None
+    except Exception as error:
+        # A failed module must not stop other concurrent module requests.
+        failure = format_ai_error(module_title, error)
+        LOGGER.warning("%s", failure)
+        return None, failure
+
+
+async def process_payload(payload, errors, client=None):
+    """Process all modules and return the next payload with the same error list.
+
+    Module tasks run concurrently but share a four-request semaphore. Failed
+    modules append hard errors; successful modules keep input order. ``client``
+    may be injected by tests, otherwise this function creates and closes it.
+    """
+    if payload is None:
+        return None, errors
+
+    LOGGER.info(
+        "AI Manager started with %d module(s)",
+        len(payload["modules"]),
     )
 
+    # Reuse an injected client in tests; own and close clients created here.
+    owns_client = client is None
+    if owns_client:
+        try:
+            client = create_client()
+        except ValueError as error:
+            errors.append(format_ai_error("configuration", error))
+            return None, errors
 
-def _list_or_empty(value):
-    return value if isinstance(value, list) else []
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    module_tasks = [
+        process_module(module, client, semaphore)
+        for module in payload["modules"]
+    ]
 
+    try:
+        # gather keeps results aligned with the original module order.
+        results = await asyncio.gather(*module_tasks)
+    finally:
+        if owns_client:
+            await client.close()
 
-def _text_list(value):
-    if not isinstance(value, list):
-        raise ValueError("Expected a list of text values.")
-    text_items = []
-    for item in value:
-        if not isinstance(item, str):
-            raise ValueError("Expected every list item to be text.")
-        cleaned_item = item.strip()
-        if cleaned_item:
-            text_items.append(cleaned_item)
-    return text_items
+    # Keep only successful modules while flushing hard failures forward.
+    processed_modules = []
+    for processed_module, module_error in results:
+        if module_error is not None:
+            errors.append(module_error)
+        else:
+            processed_modules.append(processed_module)
 
+    if not processed_modules:
+        LOGGER.warning("AI Manager produced no usable modules")
+        return None, errors
 
-def _unique_text(items):
-    unique_items = []
-    for item in items:
-        cleaned_item = str(item).strip()
-        if cleaned_item and cleaned_item not in unique_items:
-            unique_items.append(cleaned_item)
-    return unique_items
-
-
-def _number_or_none(value):
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("Expected a number or null.")
-    return float(value)
-
-
-def _week_or_none(value):
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError("Expected an integer week or null.")
-    return value
-
-
-def _safe_error(error):
-    if isinstance(error, ConnectionError):
-        return str(error)
-    if isinstance(error, OSError):
-        return "An uploaded file could not be read."
-    return str(error) or "The model response could not be processed."
+    LOGGER.info(
+        "AI Manager prepared %d module(s)",
+        len(processed_modules),
+    )
+    return {
+        "module_count": len(processed_modules),
+        "modules": processed_modules,
+    }, errors

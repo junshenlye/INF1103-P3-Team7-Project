@@ -1,120 +1,127 @@
-# Stackplan MVP
+# Stackplan
 
-Stackplan extracts assessment evidence from any number of modules and returns
-canonical module data for the frontend. Logic Manager preserves the extracted
-facts and adds one deterministic schedule weight to each graded or bonus item.
+The command-line workflow passes module evidence through the IO Manager and AI
+Manager. IO validates and stores images; AI interprets and normalizes assessment
+information for scheduling.
 
-## Flow
+## Local use
 
-```text
-Frontend Demo
-  -> IO Manager validates and normalizes all modules
-  -> AI Manager extracts assessment facts and uncertainty
-  -> Logic Manager calculates assessment weightage × module credits
-  -> Data Manager stores input, extraction, and the final result
-  -> Frontend sorts the assessments and builds its own timeline
+The repository includes `test_payload.json`. Its format is:
+
+```json
+{
+  "module_count": 2,
+  "modules": [
+    {
+      "module_title": "INF1103",
+      "credit": 4,
+      "file_path": "test_case/INF1103.png"
+    },
+    {
+      "module_title": "INF1104",
+      "credit": 4,
+      "file_path": "test_case/INF1104.png"
+    }
+  ]
+}
 ```
 
-`src/main.py` remains the orchestration layer and the frontend uses the
-`{"modules": [...]}` request.
-
-## Deterministic calculations
-
-- Schedule weight = extracted assessment weightage × module credits.
-- Module and assessment order is preserved.
-- No rank, deadline tier, pressure, overlap, cluster, or timeline is calculated.
-- Recurrence, dates, weeks, comments, assumptions, confidence, and missing
-  information are copied unchanged for the frontend.
-
-Each module runs through the same three-stage chain: a fast image relevance
-precheck, evidence-only context extraction, and text-only schedule reasoning.
-The default models are `qwen3.7-flash`, `qwen3.7-plus`, and `qwen3.7-plus`
-respectively. Override them with `AI_PRECHECK_MODEL`, `AI_CONTEXT_MODEL`, and
-`AI_REASONING_MODEL`.
-
-The reasoning stage uses non-thinking mode with a compact output limit because
-the evidence has already been extracted and the output follows a strict schema.
-Each model call has a 45-second limit with no automatic retry, and the complete AI request
-has a 240-second limit. Override these with `AI_MODEL_TIMEOUT_SECONDS`,
-`AI_MODEL_RETRIES`, and `AI_REQUEST_TIMEOUT_SECONDS`.
-
-Multiple modules use this same chain concurrently. Two model calls are in flight
-by default (`AI_MAX_CONCURRENT_REQUESTS`) and results remain in frontend order.
-Task 3
-classifies visible rows as graded, aggregate, bonus, ungraded, or uncertain.
-Only unusable input or a processing failure rejects the request.
-
-When one module fails but another succeeds, the request returns
-`partial_success`. Failed modules are listed separately and successful modules
-continue through Logic Manager and Data Manager.
-
-### Code map
-
-- `src/io_manager.py`: validates frontend fields once and classifies each accepted
-  path into canonical `images` or `documents` data for downstream managers.
-- `src/ai_manager.py`: the AI boundary. It owns the three prompts, model requests,
-  response schemas, one normalization pass, and one grouped module-failure payload.
-- `process`: is the synchronous Flask-compatible wrapper around `process_async`.
-  The async function gathers independent requests in their original order. Each
-  reply is normalized once before the final result is assembled.
-- `_extract_module`: visibly runs precheck, context extraction, and final
-  reasoning for one module. A module failure stays isolated to that module.
-- `_call_model`: is the asynchronous OpenAI-compatible transport used by the
-  extraction flow.
-- `_pacing_schema`: defines the strict model response contract, including
-  recurring weight scope.
-- `_normalize_module_result`: converts the final reasoning output to the
-  canonical module shape without repairing fractional weights or inferred weeks.
-- `src/logic_manager.py`: preserves canonical module data, calculates schedule
-  weight, and groups hard AI failures.
-
-The AI Manager has one multi-module extraction path; each module is processed
-independently through the same prompt, schema, and normalization flow.
-
-## Run
-
-Copy `.env.example` to `.env` and provide `DASHSCOPE_API_KEY`.
+Create the local environment file and add your DashScope API key:
 
 ```sh
-docker compose up -d --build backend
+cp .env.example .env
+```
 
+```dotenv
+DASHSCOPE_API_KEY="your-key"
+DASHSCOPE_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+```
+
+Install the dependencies and pass the payload file to the CLI:
+
+```sh
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python frontend-demo/app.py
+python -m src.main test_payload.json
 ```
 
-- Frontend: http://127.0.0.1:5050
-- Extraction endpoint: http://127.0.0.1:5050/api/extractions
-- Stored module data: http://127.0.0.1:5050/api/data
-- Health: http://127.0.0.1:5050/health
+The CLI emits one JSON object containing `payload` and `errors`. Failed modules
+are excluded from the clean payload, while their hard errors remain in the
+shared error list for later managers. AI uncertainties stay with their module as
+`follow_ups` metadata and are not promoted to hard errors. Relative file paths
+are resolved from the payload file's directory.
 
-The frontend accepts images, PDF, DOCX, and simple text-based files. Uploads
-exist only for the duration of one request. The Flask frontend runs on the host
-and sends newline-delimited JSON to the persistent backend container at
-`127.0.0.1:8000`. The backend container communicates with PostgreSQL through the
-Compose network. There is no local JSON persistence fallback.
+IO payload validation checks the basic structure and types: `module_count` and
+`credit` must be integers, `modules` must be an array, and `module_title` must
+be a string. `validate_and_store_images()` accepts readable JPEG and PNG images
+up to 10 MB and stores successful files as optimized, lossless PNGs in temporary
+working storage. This preserves the decoded pixels without another lossy encode;
+JPEG source files may already contain lossy compression. The AI Manager receives
+only this validated IO output.
 
-The Compose database is intentionally disposable: PostgreSQL stores its data in
-container memory rather than a named or host volume. `docker compose restart db`
-or `docker compose down` clears the database so the next start is a clean test
-run. If `DATABASE_URL` is unset, storage is unavailable rather than silently
-switching to another persistent data source.
+IO failures are kept outside the AI payload as strings beginning with
+`IO Manager error:`. Invalid modules are removed, the remaining modules
+continue, and the collected messages can be passed to the future logging layer.
 
-After an extraction, the frontend shows the measured IO Manager, AI Manager,
-Logic Manager, Data Manager, and end-to-end request runtimes. It also shows each
-module/model/stage duration and any skipped module. This last-run display is kept
-in the browser session; the assessment data itself is loaded from PostgreSQL
-through Data Manager.
+## Testing
 
-The frontend scheduler derives its columns from the highest supplied `due_week`.
-Weeks are displayed horizontally. Assessments with the same due week are stacked
-vertically by descending `schedule_weight`. Recurring or incomplete items without
-a due week remain in a separate timing-missing list and are never expanded or
-placed by assumption.
-
-## Test
+Run the offline unit tests without making Qwen requests:
 
 ```sh
-python -m pytest -q
+source .venv/bin/activate
+PYTHONPATH=. pytest -q
 ```
+
+Run a lower-cost live AI Manager check with one representative module:
+
+```sh
+docker compose build
+./scripts/run_quick_test.sh
+```
+
+The quick payload uses INF1104 and exercises repeated tutorials, group weights,
+fixed teaching weeks and the final examination. A relevant module makes one
+Qwen Flash relevance request and two Qwen Plus reasoning requests.
+
+## Logging
+
+The CLI enables progress logs for the pipeline and its managers. Errors remain
+in the returned error list for the next pipeline stage. Logs are not stored in
+files; Docker captures the console stream automatically. Each Qwen HTTP request
+logs its module, processing pass, model, outcome and elapsed provider time. The
+measurement starts after the concurrency slot is acquired, so queue time is not
+included.
+
+## Docker
+
+Build and run the CLI with Docker Compose:
+
+```sh
+docker compose build
+docker compose run --rm stackplan
+```
+
+Compose reads `.env`, mounts the repository as read-only input, and supplies
+`test_payload.json` to the container. These defaults are defined in
+`compose.yaml`, so credentials do not need to appear in the run command.
+
+The default Compose command uses `test_payload.json` and runs all four example
+modules. Use the quick test above during normal development to reduce token use.
+
+To run the image without Compose, pass the runtime environment explicitly:
+
+```sh
+docker run --rm \
+  --env-file .env \
+  --volume "$PWD:/workspace:ro" \
+  stackplan /workspace/test_payload.json
+```
+
+The Dockerfile does not copy `.env` into the image. Secrets copied during a
+build remain in image layers, so the `.dockerignore` entry for `.env` should
+remain in place.
+
+The IO manager creates `/tmp/stackplan-intake` when it copies the first file.
+This directory is only working storage, and its cached files disappear with the
+container when `--rm` removes it.

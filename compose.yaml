@@ -1,0 +1,10 @@
+services:
+  stackplan:
+    build: .
+    image: stackplan
+    env_file:
+      - .env
+    volumes:
+      - .:/input:ro
+    command:
+      - /input/test_payload.json

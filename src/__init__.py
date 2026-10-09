@@ -1,1 +1,3 @@
-"""Procedural core for the academic assessment prioritiser."""
+"""StackPlan processing package."""
+
+from . import ai_manager, io_manager
