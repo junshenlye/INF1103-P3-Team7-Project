@@ -1,125 +1,209 @@
 # Stackplan
 
-The command-line workflow passes module evidence through the IO Manager and AI
-Manager. IO validates and stores images; AI interprets and normalizes assessment
-information for scheduling.
+Stackplan extracts assessment information from module screenshots, builds a
+Week 1-14 schedule, stores revision history in PostgreSQL, and can generate a
+validated work checklist or trimester revision plan.
 
-## Local use
+The submission keeps the core procedure in `src/`:
 
-The repository includes `test_payload.json`. Its format is:
-
-```json
-{
-  "module_count": 2,
-  "modules": [
-    {
-      "module_title": "INF1103",
-      "credit": 4,
-      "file_path": "test_case/INF1103.png"
-    },
-    {
-      "module_title": "INF1104",
-      "credit": 4,
-      "file_path": "test_case/INF1104.png"
-    }
-  ]
-}
+```text
+IO Manager -> AI Manager -> Logic Manager -> Data Manager
 ```
 
-Create the local environment file and add your DashScope API key:
+HTTP, Docker staging and HTML rendering are adapters under `helpers/`. A future
+frontend is intentionally separate from the Python submission.
+
+## Requirements
+
+- Docker with Docker Compose
+- A DashScope API key for live Qwen processing
+- Python 3.12 for non-Docker development
+
+Create the environment file:
 
 ```sh
 cp .env.example .env
 ```
 
-```dotenv
-DASHSCOPE_API_KEY="your-key"
-DASHSCOPE_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+Add `DASHSCOPE_API_KEY` to `.env`. Database defaults are suitable for local
+Compose development and can be changed in the same file.
+
+## Run with Docker
+
+Build the application and start PostgreSQL:
+
+```sh
+docker compose build
+docker compose up --detach database
 ```
 
-Install the dependencies and pass the payload file to the CLI:
+Run the one-module low-cost payload:
+
+```sh
+docker compose run --rm stackplan-cli /input/test_payload_quick.json
+```
+
+Run all supplied module examples:
+
+```sh
+docker compose run --rm stackplan-cli /input/test_payload.json
+```
+
+Compose waits for PostgreSQL's health check before starting the CLI. The
+database schema is created from `database/schema.sql` when the database volume
+is created for the first time.
+
+## Docker payload helper
+
+The helper accepts a payload anywhere on the host, stages its referenced images
+in a temporary directory, starts PostgreSQL and invokes the Compose CLI:
+
+```sh
+python -m helpers.docker_cli test_payload_quick.json \
+  --project-name "Trimester 1" \
+  --output stackplan-result.json
+```
+
+The temporary intake directory is removed after the command. Credentials stay
+in `.env` and are not added to the command line or Docker image.
+
+## Run locally
+
+PostgreSQL can remain in Docker while the Python program runs locally:
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m src.main test_payload.json
+python -m pip install -r requirements-dev.txt
+docker compose up --detach database
 ```
 
-The CLI emits one JSON object containing `payload` and `errors`. Failed modules
-are excluded from the clean payload, while their hard errors remain in the
-shared error list for later managers. AI uncertainties stay with their module as
-`follow_ups` metadata and are not promoted to hard errors. Relative file paths
-are resolved from the payload file's directory.
+Use a host-accessible database URL before running the CLI. The Compose database
+does not publish a host port by default, so direct local Python runs may omit
+`DATABASE_URL`; processing still works but persistence is skipped. Docker is
+the recommended complete workflow.
 
-IO payload validation checks the basic structure and types: `module_count` and
-`credit` must be integers, `modules` must be an array, and `module_title` must
-be a string. `validate_and_store_images()` accepts readable JPEG and PNG images
-up to 10 MB and stores successful files in temporary working storage. The AI
-Manager receives only this validated IO output.
+```sh
+python -m src.main test_payload_quick.json
+```
 
-IO failures are kept outside the AI payload as strings beginning with
-`IO Manager error:`. Invalid modules are removed, the remaining modules
-continue, and the collected messages can be passed to the future logging layer.
+The CLI prints one JSON document containing `payload` and `errors`. Logs use
+standard error, so redirected JSON remains valid. Complete pipeline failure
+returns a non-zero process status.
 
-## Testing
+## API helper
 
-Run the offline unit tests without making Qwen requests:
+Start PostgreSQL and the frontend-facing helper:
+
+```sh
+docker compose up --build api
+```
+
+The API listens on `http://localhost:8000`. Important endpoints are:
+
+```text
+GET    /health
+GET    /api/projects
+POST   /api/projects
+GET    /api/projects/{project_id}
+POST   /api/projects/{project_id}/process
+GET    /api/projects/{project_id}/schedule
+PUT    /api/projects/{project_id}/modules/{module_title}
+POST   /api/projects/{project_id}/modules/{module_title}/confirm
+GET    /api/projects/{project_id}/recommendations
+POST   /api/projects/{project_id}/recommendations
+POST   /api/projects/{project_id}/recommendations/{id}/status
+```
+
+The API contains no assessment business logic. It invokes the core CLI or calls
+the public manager interfaces and returns JSON for the future frontend.
+
+## AI recommendations
+
+AI Manager supports two recommendation types:
+
+- `work_checklist`
+- `trimester_revision_plan`
+
+Recommendations use confirmed module records only. Local validation rejects
+unknown assessment IDs, unknown modules, invalid teaching weeks, mismatched
+week groups and plans exceeding the student's stated weekly hours. Advice is
+stored separately and never changes assessment weights, weeks or names.
+
+Example recommendation request body:
+
+```json
+{
+  "recommendation_type": "work_checklist",
+  "preferences": {
+    "available_hours_per_week": 8,
+    "current_week": 4,
+    "preferred_days": ["Tuesday", "Saturday"]
+  }
+}
+```
+
+## Data storage
+
+PostgreSQL stores:
+
+- trimester projects;
+- pipeline runs and hard errors;
+- versioned normalized module JSON;
+- confirmed and candidate module revisions;
+- recommendation candidates and their acceptance state.
+
+The first extraction of a module is confirmed automatically. A later AI rerun
+is stored as a candidate and cannot overwrite confirmed student data. Manual
+edits create another revision so the original extraction remains auditable.
+
+The source hash, prompt version and model combination form an extraction cache.
+An identical complete rerun can reuse confirmed module results and avoid Qwen
+requests.
+
+## Tests
+
+Tests are divided by intent:
+
+```text
+tests/function/  - manager functions and deterministic validation
+tests/workflow/  - manager chain, database, API and Docker staging
+```
+
+Run tests that do not require PostgreSQL:
 
 ```sh
 source .venv/bin/activate
-PYTHONPATH=. pytest -q
+PYTHONPATH=. pytest -q -p no:cacheprovider
 ```
 
-Run a lower-cost live AI Manager check with one representative module:
+Run the complete suite against a disposable PostgreSQL container:
 
 ```sh
-docker compose build
+docker compose -f compose.test.yaml up \
+  --build \
+  --abort-on-container-exit \
+  --exit-code-from tests
+```
+
+The test database uses temporary container storage and does not touch the
+development volume. Tests use fake AI responses and do not consume Qwen tokens.
+The explicit quick-test script is the opt-in live model check:
+
+```sh
 ./scripts/run_quick_test.sh
 ```
 
-The quick payload uses INF1104 and exercises repeated tutorials, group weights,
-fixed teaching weeks and the final examination. A relevant module makes one
-Qwen Flash relevance request and two Qwen Plus reasoning requests.
+## Timetable snapshot helper
 
-## Logging
-
-The CLI enables progress logs for the pipeline and its managers. Errors remain
-in the returned error list for the next pipeline stage. Logs are not stored in
-files; Docker captures the console stream automatically. Each Qwen HTTP request
-logs its module, processing pass, model, outcome and elapsed provider time. The
-measurement starts after the concurrency slot is acquired, so queue time is not
-included.
-
-## Docker
-
-Build and run the CLI with Docker Compose:
+The old HTML view remains a presentation adapter and is not part of `src`:
 
 ```sh
-docker compose build
-docker compose run --rm stackplan
+python -m helpers.timetable_renderer \
+  stackplan-result.json \
+  frontend-demo/timetable.html
 ```
 
-Compose reads `.env`, mounts the repository as read-only input, and supplies
-`test_payload.json` to the container. These defaults are defined in
-`compose.yaml`, so credentials do not need to appear in the run command.
-
-The default Compose command uses `test_payload.json` and runs all four example
-modules. Use the quick test above during normal development to reduce token use.
-
-To run the image without Compose, pass the runtime environment explicitly:
-
-```sh
-docker run --rm \
-  --env-file .env \
-  --volume "$PWD:/workspace:ro" \
-  stackplan /workspace/test_payload.json
-```
-
-The Dockerfile does not copy `.env` into the image. Secrets copied during a
-build remain in image layers, so the `.dockerignore` entry for `.env` should
-remain in place.
-
-The IO manager creates `/tmp/stackplan-intake` when it copies the first file.
-This directory is only working storage, and its cached files disappear with the
-container when `--rm` removes it.
+The future frontend should consume API data rather than this generated file.
+See [system design](docs/system-design.md) and the
+[Astra frontend design sheet](docs/astra-frontend-design-sheet.md).
