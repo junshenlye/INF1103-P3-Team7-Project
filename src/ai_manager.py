@@ -24,17 +24,20 @@ from .ai_prompts import (
     INTERPRETATION_PROMPT,
     NORMALIZATION_PROMPT,
     RELEVANCE_PROMPT,
+    TRIMESTER_REVISION_PROMPT,
+    WORK_CHECKLIST_PROMPT,
 )
 
 
 RELEVANCE_MODEL = "qwen3.7-flash"
 REASONING_MODEL = "qwen3.7-plus"
 MAX_CONCURRENT_REQUESTS = 4
+PROMPT_VERSION = "2026-10-11-v1"
 LOGGER = logging.getLogger(__name__)
 
 # Values below form the stable part of the payload contract. Model wording is
 # cleaned against these values before it reaches Logic Manager.
-SCHEDULE_KINDS = {"week", "week_range", "date", "recurring", "unknown"}
+SCHEDULE_KINDS = {"week", "week_range", "recurring", "unknown"}
 WEIGHT_SCOPES = {"module", "part", "group", "unknown"}
 RECORD_ROLES = {"assessment", "group"}
 COVERAGE_STATUSES = {"appears_complete", "partial", "unclear"}
@@ -75,6 +78,11 @@ FOLLOW_UP_FIELDS = {
     "weight_percent",
     "group_weight_percent",
 }
+RECOMMENDATION_TYPES = {
+    "work_checklist": WORK_CHECKLIST_PROMPT,
+    "trimester_revision_plan": TRIMESTER_REVISION_PROMPT,
+}
+RECOMMENDATION_PRIORITIES = {"high", "medium", "low"}
 
 
 def format_ai_error(module_title, error):
@@ -330,8 +338,6 @@ def normalize_schedule(schedule, assessment, follow_ups, required=True):
         "week": schedule.get("week"),
         "start_week": schedule.get("start_week"),
         "end_week": schedule.get("end_week"),
-        "date": schedule.get("date"),
-        "day": schedule.get("day"),
         "raw": schedule.get("raw"),
     }
     if normalized["kind"] not in SCHEDULE_KINDS:
@@ -345,12 +351,7 @@ def normalize_schedule(schedule, assessment, follow_ups, required=True):
         or type(normalized["end_week"]) is not int
     ):
         normalized["kind"] = "unknown"
-    elif kind == "date" and not isinstance(normalized["date"], str):
-        normalized["kind"] = "unknown"
-    elif kind == "recurring" and not (
-        isinstance(normalized["day"], str)
-        or isinstance(normalized["raw"], str)
-    ):
+    elif kind == "recurring" and not isinstance(normalized["raw"], str):
         normalized["kind"] = "unknown"
 
     if normalized["kind"] == "unknown" and required:
@@ -358,7 +359,7 @@ def normalize_schedule(schedule, assessment, follow_ups, required=True):
             follow_ups,
             assessment,
             "schedule",
-            "No complete schedulable week, date, or recurrence was stated.",
+            "No complete schedulable teaching week or recurrence was stated.",
         )
     return normalized
 
@@ -828,3 +829,274 @@ async def process_payload(payload, errors, client=None):
         "module_count": len(processed_modules),
         "modules": processed_modules,
     }, errors
+
+
+def normalize_study_preferences(preferences):
+    """Return the small validated preference set used by recommendations."""
+    if preferences is None:
+        preferences = {}
+    if not isinstance(preferences, dict):
+        raise ValueError("Study preferences must be a dictionary.")
+
+    available_hours = preferences.get("available_hours_per_week", 8)
+    current_week = preferences.get("current_week", 1)
+    if type(available_hours) not in (int, float) or not 0 < available_hours <= 168:
+        raise ValueError("available_hours_per_week must be between 0 and 168.")
+    if type(current_week) is not int or not 1 <= current_week <= 14:
+        raise ValueError("current_week must be an integer from 1 to 14.")
+
+    preferred_days = preferences.get("preferred_days", [])
+    if not isinstance(preferred_days, list) or not all(
+        isinstance(day, str) for day in preferred_days
+    ):
+        raise ValueError("preferred_days must be an array of strings.")
+    return {
+        "available_hours_per_week": available_hours,
+        "current_week": current_week,
+        "preferred_days": preferred_days,
+    }
+
+
+def collect_recommendation_references(project_payload):
+    """Return valid assessment IDs and module titles from confirmed data."""
+    if not isinstance(project_payload, dict):
+        raise ValueError("Recommendation input must be a project payload.")
+    modules = project_payload.get("modules")
+    if not isinstance(modules, list) or not modules:
+        raise ValueError("Recommendation input has no confirmed modules.")
+
+    module_titles = set()
+    assessment_ids = set()
+    for module in modules:
+        module_title = module.get("module_title")
+        if not isinstance(module_title, str):
+            raise ValueError("Recommendation input contains an invalid module.")
+        module_titles.add(module_title)
+        for group in module.get("assessment_types", []):
+            for assessment in group.get("assessments", []):
+                assessment_id = assessment.get("assessment_id")
+                if isinstance(assessment_id, str):
+                    assessment_ids.add(assessment_id)
+    return module_titles, assessment_ids
+
+
+def normalize_plan_item(item, module_titles, assessment_ids, expected_week=None):
+    """Validate and return one recommendation item without adding facts."""
+    if not isinstance(item, dict):
+        raise ValueError("Recommendation contains an invalid plan item.")
+    title = item.get("title")
+    module_title = item.get("module_title")
+    assessment_id = item.get("assessment_id")
+    week = item.get("week")
+    estimated_hours = item.get("estimated_hours")
+    priority = item.get("priority")
+    reason = item.get("reason")
+
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("Every recommendation item needs a title.")
+    if module_title not in module_titles:
+        raise ValueError("Recommendation references an unknown module.")
+    if assessment_id is not None and assessment_id not in assessment_ids:
+        raise ValueError("Recommendation references an unknown assessment.")
+    if type(week) is not int or not 1 <= week <= 14:
+        raise ValueError("Recommendation week must be between 1 and 14.")
+    if expected_week is not None and week != expected_week:
+        raise ValueError("Recommendation item week does not match its week group.")
+    if type(estimated_hours) not in (int, float) or estimated_hours <= 0:
+        raise ValueError("Recommendation hours must be a positive number.")
+    if priority not in RECOMMENDATION_PRIORITIES:
+        raise ValueError("Recommendation priority must be high, medium or low.")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("Every recommendation item needs a reason.")
+
+    return {
+        "title": title.strip(),
+        "assessment_id": assessment_id,
+        "module_title": module_title,
+        "week": week,
+        "estimated_hours": round(estimated_hours, 2),
+        "priority": priority,
+        "reason": reason.strip(),
+    }
+
+
+def validate_weekly_hours(items, available_hours):
+    """Reject recommendation output that exceeds the student's weekly limit."""
+    totals = {}
+    for item in items:
+        week = item["week"]
+        totals[week] = round(totals.get(week, 0) + item["estimated_hours"], 2)
+    if any(total > available_hours for total in totals.values()):
+        raise ValueError("Recommendation exceeds available_hours_per_week.")
+    return totals
+
+
+def normalize_recommendation_output(
+    recommendation,
+    recommendation_type,
+    project_payload,
+    preferences,
+):
+    """Validate model advice against confirmed modules and study capacity."""
+    if recommendation_type not in RECOMMENDATION_TYPES:
+        raise ValueError("Unsupported recommendation type.")
+    if not isinstance(recommendation, dict):
+        raise ValueError("Recommendation model returned an invalid response.")
+    if recommendation.get("recommendation_type") != recommendation_type:
+        raise ValueError("Recommendation type does not match the request.")
+
+    summary = recommendation.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("Recommendation needs a summary.")
+    normalized_preferences = normalize_study_preferences(preferences)
+    module_titles, assessment_ids = collect_recommendation_references(
+        project_payload
+    )
+
+    if recommendation_type == "work_checklist":
+        raw_items = recommendation.get("items")
+        if not isinstance(raw_items, list):
+            raise ValueError("Work checklist must contain an item array.")
+        items = [
+            normalize_plan_item(item, module_titles, assessment_ids)
+            for item in raw_items
+        ]
+        weekly_hours = validate_weekly_hours(
+            items,
+            normalized_preferences["available_hours_per_week"],
+        )
+        return {
+            "recommendation_type": recommendation_type,
+            "summary": summary.strip(),
+            "items": items,
+            "weekly_hours": weekly_hours,
+        }
+
+    raw_weeks = recommendation.get("weeks")
+    if not isinstance(raw_weeks, list):
+        raise ValueError("Revision plan must contain a week array.")
+    seen_weeks = set()
+    weeks = []
+    all_items = []
+    for raw_week in raw_weeks:
+        if not isinstance(raw_week, dict):
+            raise ValueError("Revision plan contains an invalid week.")
+        week_number = raw_week.get("week")
+        focus = raw_week.get("focus")
+        raw_items = raw_week.get("items")
+        if (
+            type(week_number) is not int
+            or not 1 <= week_number <= 14
+            or week_number in seen_weeks
+        ):
+            raise ValueError("Revision plan contains an invalid or duplicate week.")
+        if not isinstance(focus, str) or not focus.strip():
+            raise ValueError("Every revision week needs a focus.")
+        if not isinstance(raw_items, list):
+            raise ValueError("Every revision week needs an item array.")
+        seen_weeks.add(week_number)
+        items = [
+            normalize_plan_item(
+                item,
+                module_titles,
+                assessment_ids,
+                expected_week=week_number,
+            )
+            for item in raw_items
+        ]
+        all_items.extend(items)
+        weeks.append(
+            {
+                "week": week_number,
+                "focus": focus.strip(),
+                "items": items,
+                "total_hours": round(
+                    sum(item["estimated_hours"] for item in items),
+                    2,
+                ),
+            }
+        )
+    validate_weekly_hours(
+        all_items,
+        normalized_preferences["available_hours_per_week"],
+    )
+    weeks.sort(key=lambda week: week["week"])
+    return {
+        "recommendation_type": recommendation_type,
+        "summary": summary.strip(),
+        "weeks": weeks,
+    }
+
+
+async def generate_recommendation(
+    client,
+    recommendation_type,
+    project_payload,
+    preferences,
+    semaphore,
+):
+    """Ask Qwen for one structured checklist or trimester revision plan."""
+    prompt = RECOMMENDATION_TYPES.get(recommendation_type)
+    if prompt is None:
+        raise ValueError("Unsupported recommendation type.")
+    normalized_preferences = normalize_study_preferences(preferences)
+    context = {
+        "confirmed_project": project_payload,
+        "study_preferences": normalized_preferences,
+    }
+    messages = [
+        {
+            "role": "user",
+            "content": f"{prompt}\n\nINPUT DATA:\n{json.dumps(context)}",
+        }
+    ]
+    content = await call_model(
+        client,
+        REASONING_MODEL,
+        messages,
+        thinking=True,
+        semaphore=semaphore,
+        task_name=f"{recommendation_type} recommendation",
+    )
+    recommendation = parse_json_content(content)
+    return normalize_recommendation_output(
+        recommendation,
+        recommendation_type,
+        project_payload,
+        normalized_preferences,
+    )
+
+
+async def process_recommendation(
+    project_payload,
+    recommendation_type,
+    preferences,
+    errors,
+    client=None,
+):
+    """Generate one recommendation while preserving the shared error list."""
+    owns_client = client is None
+    if owns_client:
+        try:
+            client = create_client()
+        except ValueError as error:
+            errors.append(format_ai_error("configuration", error))
+            return None, errors
+
+    try:
+        recommendation = await generate_recommendation(
+            client,
+            recommendation_type,
+            project_payload,
+            preferences,
+            asyncio.Semaphore(MAX_CONCURRENT_REQUESTS),
+        )
+        return recommendation, errors
+    except Exception as error:
+        failure = format_ai_error("recommendation", error)
+        LOGGER.warning("%s", failure)
+        errors.append(failure)
+        return None, errors
+    finally:
+        if owns_client:
+            await client.close()

@@ -26,11 +26,11 @@ Identify:
 - multiplicity such as "x 10", weekly work, numbered items, and ranges;
 - whether a weight belongs to one item, a group, a module part, or is unclear;
 - parent-child relationships such as a project containing a proposal;
-- explicit weeks, dates, recurring patterns, and missing schedule details;
+- explicit teaching weeks, recurring patterns, and missing schedule details;
 - contradictions, vague statements, cropped content, and missing information;
 - whether the visible source appears complete, partial, or unclear.
 
-Do not invent individual weights, dates, teaching weeks, or equal divisions.
+Do not invent individual weights, teaching weeks, or equal divisions.
 Keep identically named source rows separate when they represent different
 assessments. Limit follow-ups to uncertainty about assessment count, grading,
 weight, scheduling, hierarchy, source coverage, or another material assessment
@@ -64,12 +64,10 @@ Return JSON only. Do not wrap it in Markdown. Use this exact shape:
           "weight_scope": "module | part | group | unknown",
           "weight_scope_name": "string or null",
           "schedule": {
-            "kind": "week | week_range | date | recurring | unknown",
+            "kind": "week | week_range | recurring | unknown",
             "week": "integer or null",
             "start_week": "integer or null",
             "end_week": "integer or null",
-            "date": "string or null",
-            "day": "string or null",
             "raw": "source wording or null"
           },
           "parent_assessment": "parent name or null",
@@ -105,7 +103,70 @@ Rules:
 - Follow-ups must affect count, grading, weight, schedule, hierarchy, source
   coverage, or another material assessment fact. Do not speculate about
   delivery format, online versus in-person mode, or unmentioned topics.
-- Do not question an explicit week or date merely because its ordering looks
+- Do not question an explicit teaching week merely because its ordering looks
   unusual. Do not request rubrics or task instructions unless their absence
   prevents the assessment from being scheduled or weighted.
+"""
+
+
+WORK_CHECKLIST_PROMPT = """WORK CHECKLIST RECOMMENDATION
+Create a practical student checklist from the confirmed assessment data and
+study preferences supplied below.
+
+Return JSON only in this shape:
+{
+  "recommendation_type": "work_checklist",
+  "summary": "short overview",
+  "items": [
+    {
+      "title": "specific action",
+      "assessment_id": "existing assessment ID or null",
+      "module_title": "existing module title",
+      "week": 1,
+      "estimated_hours": 1.5,
+      "priority": "high | medium | low",
+      "reason": "why this action is useful"
+    }
+  ]
+}
+
+Use only assessment IDs, modules, weights and teaching weeks present in the
+confirmed data. Recommendations may add preparation actions but must not invent
+deadlines, marks or assessment facts. Keep the total estimated hours in each
+week within available_hours_per_week. Use null assessment_id only for a general
+study habit that still belongs to an existing module.
+"""
+
+
+TRIMESTER_REVISION_PROMPT = """TRIMESTER REVISION PLAN
+Create a Week 1-14 revision plan from the confirmed assessment data and study
+preferences supplied below.
+
+Return JSON only in this shape:
+{
+  "recommendation_type": "trimester_revision_plan",
+  "summary": "short overview",
+  "weeks": [
+    {
+      "week": 1,
+      "focus": "short weekly focus",
+      "items": [
+        {
+          "title": "specific revision action",
+          "assessment_id": "existing assessment ID or null",
+          "module_title": "existing module title",
+          "week": 1,
+          "estimated_hours": 1.5,
+          "priority": "high | medium | low",
+          "reason": "why this action is useful"
+        }
+      ]
+    }
+  ]
+}
+
+Use Weeks 1-14 only. Use only assessment IDs, modules, weights and teaching
+weeks present in the confirmed data. Start preparation before important work,
+retain catch-up capacity, and keep each week's total within
+available_hours_per_week. Suggestions must not become new assessment facts.
 """
