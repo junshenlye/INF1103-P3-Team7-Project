@@ -1,10 +1,71 @@
 services:
-  stackplan:
-    build: .
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stackplan}
+      POSTGRES_USER: ${POSTGRES_USER:-stackplan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stackplan-local}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - stackplan-data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+  stackplan-cli:
+    build:
+      context: .
+      target: runtime
     image: stackplan
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-stackplan}:${POSTGRES_PASSWORD:-stackplan-local}@database:5432/${POSTGRES_DB:-stackplan}
+    depends_on:
+      database:
+        condition: service_healthy
     volumes:
       - .:/input:ro
     command:
       - /input/test_payload.json
+
+  api:
+    image: stackplan
+    build:
+      context: .
+      target: runtime
+    entrypoint:
+      - gunicorn
+      - --bind
+      - 0.0.0.0:8000
+      - --workers
+      - "2"
+      - --timeout
+      - "1800"
+      - helpers.api_helper:APP
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-stackplan}:${POSTGRES_PASSWORD:-stackplan-local}@database:5432/${POSTGRES_DB:-stackplan}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:5173}
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  stackplan-data:
