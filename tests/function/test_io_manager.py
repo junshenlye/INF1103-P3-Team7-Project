@@ -1,10 +1,24 @@
 """Function tests for IO validation and image staging."""
 
+import json
 from pathlib import Path
 
 from PIL import Image
 
 from src import io_manager
+
+
+def test_display_pipeline_result_owns_cli_output(capsys):
+    """IO Manager serializes the final payload and shared error list."""
+    payload = {"module_count": 0, "modules": []}
+    errors = ["Logic Manager error: example"]
+
+    io_manager.display_pipeline_result(payload, errors)
+
+    assert json.loads(capsys.readouterr().out) == {
+        "payload": payload,
+        "errors": errors,
+    }
 
 
 def test_validate_payload_removes_only_invalid_modules():

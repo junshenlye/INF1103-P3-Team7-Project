@@ -302,3 +302,18 @@ def process_cli_input(cli_input):
 
     # Relative image paths are interpreted from the JSON file's directory.
     return process_payload(payload, base_directory=payload_path.parent)
+
+
+def display_pipeline_result(payload, errors):
+    """Print the final CLI result as stable, human-readable JSON.
+
+    Keeping terminal output here preserves IO Manager as the system's output
+    boundary. Main only coordinates manager calls and returns Python values to
+    API or test callers.
+    """
+    print(
+        json.dumps(
+            {"payload": payload, "errors": errors},
+            indent=2,
+        )
+    )

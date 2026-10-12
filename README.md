@@ -6,6 +6,12 @@ complete DevOps workflow: multimodal extraction, deterministic scheduling,
 PostgreSQL storage, a small HTTP API, a responsive frontend, Docker deployment
 and automated tests.
 
+It is designed for students who receive assessment information across several
+module screenshots and need one reliable trimester view. The core problem is
+not simply displaying those screenshots: Stackplan uses AI to interpret vague
+or inconsistent assessment wording, then applies local rules so uncertain
+dates and weights are never presented as confirmed facts.
+
 ## Features
 
 - Upload one or more assessment screenshots for each module.
@@ -46,12 +52,32 @@ The managers in `src/` have one responsibility each:
 - **Data Manager** stores projects, results, revisions and recommendations.
 
 `main.py` deliberately owns the sequence between these managers. PostgreSQL
-uses the named `stackplan-data` Docker volume, so application data survives
-container restarts until that volume is explicitly removed.
+stores its files in the project at `database/data/`. Compose mounts that folder
+into the database container, so saved projects survive container replacement
+and the persistence boundary is visible during assessment. The runtime files
+are excluded from Git because PostgreSQL manages their binary format.
 
 Hard failures are appended to the shared `errors` list. Unclear assessment
 details remain attached to the affected module or schedule item as comment
 metadata, so one vague screenshot does not discard the rest of the result.
+
+## Assignment alignment
+
+- The assessed Python pipeline is fully procedural; there are no class
+  definitions.
+- Every accepted module image passes through Qwen relevance, interpretation
+  and normalization calls. Removing AI extraction removes the application's
+  central ability to understand assessment screenshots.
+- AI Manager parses JSON and checks the response container. Logic Manager then
+  validates domain fields before scheduling or displaying them.
+- Logic Manager contains the business rules. Its importance ranking combines
+  an explicit module-level assessment weight with module credits, ranks all
+  comparable assessments, and keeps group-only or unknown weights unranked.
+- The permitted PostgreSQL persistence option stores complete JSON documents
+  as JSONB while keeping database access behind Data Manager functions.
+- Docker Compose provides the same services locally and in the test workflow.
+- GitHub Actions runs function, frontend and isolated Docker workflow tests on
+  pushes and pull requests.
 
 ## Repository structure
 
@@ -59,7 +85,7 @@ metadata, so one vague screenshot does not discard the rest of the result.
 src/                 assessed manager pipeline
 helpers/             HTTP API and Docker payload adapter
 frontend/            independent Flask presentation layer
-database/schema.sql  PostgreSQL schema
+database/            PostgreSQL schema and ignored persistent runtime data
 tests/function/      focused manager tests
 tests/workflow/      pipeline, API and database workflow tests
 tests/frontend/      frontend contract and browser checks
@@ -102,9 +128,14 @@ Start the frontend, API and PostgreSQL database:
 ```
 
 Open <http://127.0.0.1:5173>. Incoming browser and API requests are shown in
-the terminal. Press `Ctrl+C` to stop the services; the database volume is kept.
+the terminal. Press `Ctrl+C` to stop the services; `database/data/` is kept.
 The API and frontend do not poll one another. Their `/health` endpoints remain
 available for an explicit diagnostic check without filling the logs.
+
+On the first run, the launcher creates `database/data/` and PostgreSQL applies
+`database/schema.sql`. Later runs detect the existing PostgreSQL files and reuse
+the saved projects instead of initializing the database again. Do not remove
+`database/data/` when saved project data needs to be retained.
 
 To use a different frontend port:
 
@@ -193,3 +224,34 @@ The optional end-to-end browser check requires Playwright and a running app:
 ```sh
 node tests/frontend/browser.mjs
 ```
+
+## Inspect or export saved data
+
+Start only PostgreSQL when the application services are not needed:
+
+```sh
+docker compose up --detach --wait database
+```
+
+Open PostgreSQL's command-line interface using the configured container
+credentials:
+
+```sh
+docker compose exec database sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+Useful commands inside that interface are `\dt` to list tables, `\d projects`
+to inspect one table, and `\q` to exit. A desktop client such as pgAdmin,
+DBeaver or TablePlus can also be added later by publishing PostgreSQL's port;
+the default Compose setup keeps that port private to the application network.
+
+Export a portable SQL backup without reading PostgreSQL's binary files:
+
+```sh
+docker compose exec database sh -c \
+  'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > stackplan-backup.sql
+```
+
+The files below `database/data/` are the live database storage. PostgreSQL reads
+and writes them through the bind mount; they should never be edited manually.
