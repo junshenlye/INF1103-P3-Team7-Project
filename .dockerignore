@@ -9,5 +9,5 @@
 frontend
 tests/fixtures/live
 tests/frontend
-data
+database/data
 .coverage

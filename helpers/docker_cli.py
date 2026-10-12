@@ -5,9 +5,10 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tempfile
 import uuid
+
+from src import io_manager
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -101,7 +102,7 @@ def run_docker_payload(payload_path, output_path=None, project_id=None, project_
             text=True,
         )
         if completed.stderr:
-            print(completed.stderr, file=sys.stderr, end="")
+            io_manager.display_message(completed.stderr, error=True, end="")
         if output_path is not None:
             Path(output_path).write_text(completed.stdout, encoding="utf-8")
         if completed.returncode != 0:
@@ -137,7 +138,7 @@ def main(argv=None):
     ) as error:
         parser.error(str(error))
     if arguments.output is None:
-        print(result, end="")
+        io_manager.display_message(result, end="")
 
 
 if __name__ == "__main__":

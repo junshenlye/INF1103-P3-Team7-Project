@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { capacity, newestPlan, weekLabel, weightLabel, planItems, escape } from '../../frontend/static/model.js';
+import { capacity, newestPlan, weekLabel, weightLabel, planItems, datedPlanItems, escape } from '../../frontend/static/model.js';
 
 test('capacity checks aggregate backend plan tasks', () => {
   const totals = capacity([{ week: 4, estimated_hours: 4.5 }, { week: 4, estimated_hours: 4 }, { week: 5, estimated_hours: 8 }], 8);
@@ -21,6 +21,12 @@ test('both recommendation shapes preserve assessment links', () => {
   const item = { assessment_id: 'A-1', title: 'Prepare' };
   assert.deepEqual(planItems({ recommendation_payload: { weeks: [{ week: 1, items: [item] }] } }), [item]);
   assert.deepEqual(planItems({ recommendation_payload: { items: [item] } }), [item]);
+});
+test('unknown-date assessments never appear in numbered plan weeks', () => {
+  const dated = { assessment_id: 'DATED', title: 'Prepare', week: 4 };
+  const unknown = { assessment_id: 'UNKNOWN', title: 'Do not place', week: 1 };
+  const record = { recommendation_payload: { weeks: [{ week: 1, items: [unknown, dated] }] } };
+  assert.deepEqual(datedPlanItems(record, [{ assessment_id: 'UNKNOWN' }]), [dated]);
 });
 test('untrusted source wording cannot introduce HTML', () => {
   assert.equal(escape('<script>"x" & \'y\'</script>'), '&lt;script&gt;&quot;x&quot; &amp; &#39;y&#39;&lt;/script&gt;');

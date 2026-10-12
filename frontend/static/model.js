@@ -2,6 +2,10 @@ export const weeks = Array.from({ length: 14 }, (_, i) => i + 1);
 export const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 export const assessments = module => (module.assessment_types || []).flatMap(group => (group.assessments || []).map(item => ({ ...item, group, module_title: module.module_title })));
 export const planItems = record => record.recommendation_payload?.items || (record.recommendation_payload?.weeks || []).flatMap(week => week.items || []);
+export const datedPlanItems = (record, unscheduled = []) => {
+  const unknownIds = new Set(unscheduled.map(item => item.assessment_id));
+  return planItems(record).filter(item => Number.isInteger(item.week) && !unknownIds.has(item.assessment_id));
+};
 export function weekLabel(schedule) {
   if (schedule?.kind === 'week') return `Week ${schedule.week}`;
   if (schedule?.kind === 'week_range') return `Weeks ${schedule.start_week}–${schedule.end_week}`;

@@ -14,6 +14,7 @@ import json
 import logging
 from pathlib import Path
 import shutil
+import sys
 import uuid
 from PIL import Image, UnidentifiedImageError
 
@@ -302,3 +303,24 @@ def process_cli_input(cli_input):
 
     # Relative image paths are interpreted from the JSON file's directory.
     return process_payload(payload, base_directory=payload_path.parent)
+
+
+def display_pipeline_result(payload, errors):
+    """Print the final CLI result as stable, human-readable JSON.
+
+    Keeping terminal output here preserves IO Manager as the system's output
+    boundary. Main only coordinates manager calls and returns Python values to
+    API or test callers.
+    """
+    print(
+        json.dumps(
+            {"payload": payload, "errors": errors},
+            indent=2,
+        )
+    )
+
+
+def display_message(message, error=False, end="\n"):
+    """Write helper CLI text through the shared IO output boundary."""
+    stream = sys.stderr if error else sys.stdout
+    print(message, file=stream, end=end)

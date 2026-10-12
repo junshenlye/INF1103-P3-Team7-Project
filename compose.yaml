@@ -5,13 +5,17 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-stackplan}
       POSTGRES_USER: ${POSTGRES_USER:-stackplan}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stackplan-local}
+      # PostgreSQL owns this subdirectory even when the parent is a host bind.
+      PGDATA: /var/lib/postgresql/data/pgdata
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 3s
       timeout: 3s
       retries: 10
     volumes:
-      - stackplan-data:/var/lib/postgresql/data
+      # Keep PostgreSQL files in the project so persistence is visible and
+      # independent of the database container lifecycle.
+      - ./database/data:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
 
   stackplan-cli:
@@ -107,6 +111,3 @@ services:
       test-database:
         condition: service_healthy
     command: ["-q", "-p", "no:cacheprovider"]
-
-volumes:
-  stackplan-data:

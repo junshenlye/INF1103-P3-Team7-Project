@@ -1,0 +1,31 @@
+name: Deployment check
+
+on:
+  push:
+    branches: [main, redesign-scope]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deployable-stack:
+    name: Build and smoke-test the Docker stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python for the smoke client
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build services and verify the deployed workflow
+        run: ./tests/run.sh deployment

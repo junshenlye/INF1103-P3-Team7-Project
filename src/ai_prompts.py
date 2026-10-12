@@ -214,6 +214,17 @@ Return JSON only in this shape:
         }
       ]
     }
+  ],
+  "flexible_items": [
+    {
+      "title": "specific preparation action",
+      "assessment_id": "existing unscheduled assessment ID",
+      "module_title": "existing module title",
+      "week": null,
+      "estimated_hours": 1.5,
+      "priority": "high | medium | low",
+      "reason": "why this action is useful"
+    }
   ]
 }
 
@@ -226,6 +237,10 @@ assessment facts. Use null assessment_id for a general study habit. Use null
 module_title only when it applies across all modules.
 Week 7 is recess. Leave it empty unless an item is linked to an assessment that
 the confirmed schedule explicitly places in Week 7.
+Assessments listed in schedule.unscheduled have no confirmed week. Never place
+them inside a numbered week. If one needs useful preparation advice, put it in
+flexible_items with week null. Do not describe that advice as due, current or
+upcoming. If current_week is null, do not claim that any week is "this week".
 
 Write like a practical senior student, not a project report. Use plain, direct
 English and avoid motivational filler. Keep the summary to one sentence of at
@@ -237,5 +252,5 @@ Do not repeat the title, weight or deadline in the reason. Combine repetitive
 tutorials or lab work into a simple routine instead of producing near-identical
 actions every week. Avoid generic "study habit" or "catch-up" items unless the
 confirmed workload leaves a clear need for one. A concise plan with unused
-capacity is better than a full plan.
+capacity is better than a full plan. Return no more than 6 flexible items.
 """

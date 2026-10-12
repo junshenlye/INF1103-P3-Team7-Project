@@ -1,7 +1,6 @@
 """Command-line entry point for the manager pipeline."""
 
 import asyncio
-import json
 import logging
 import os
 
@@ -146,12 +145,7 @@ def main(argv=None):
             len(errors),
         )
 
-    print(
-        json.dumps(
-            {"payload": payload, "errors": errors},
-            indent=2,
-        )
-    )
+    io_manager.display_pipeline_result(payload, errors)
     return payload, errors
 
 

@@ -181,6 +181,50 @@ def test_revision_plan_rejects_item_in_the_wrong_week_group():
         )
 
 
+def test_unknown_date_advice_is_removed_from_numbered_weeks():
+    """AI preparation cannot turn an unknown assessment date into Week 1."""
+    payload = project_payload()
+    payload["schedule"] = {
+        "recess_weeks": [7],
+        "weeks": [],
+        "unscheduled": [
+            {"assessment_id": "INF1104-QUIZ-01"}
+        ],
+    }
+
+    recommendation = logic_manager.normalize_recommendation_output(
+        {
+            "recommendation_type": "trimester_revision_plan",
+            "summary": "Prepare without inventing a deadline.",
+            "weeks": [
+                {
+                    "week": 1,
+                    "focus": "Quiz preparation",
+                    "items": [
+                        {
+                            "title": "Review quiz topics",
+                            "assessment_id": "INF1104-QUIZ-01",
+                            "module_title": "INF1104",
+                            "week": 1,
+                            "estimated_hours": 2,
+                            "priority": "medium",
+                            "reason": "Prepare once the timing is confirmed.",
+                        }
+                    ],
+                }
+            ],
+        },
+        "trimester_revision_plan",
+        payload,
+        {"available_hours_per_week": 5},
+    )
+
+    assert recommendation["weeks"] == []
+    assert recommendation["flexible_items"][0]["week"] is None
+    assert recommendation["flexible_items"][0]["timing_status"] == "date_unknown"
+    assert logic_manager.normalize_study_preferences({})["current_week"] is None
+
+
 def test_recommendation_rejects_cross_module_assessment_links():
     """An assessment cannot be displayed beneath another valid module."""
     payload = project_payload()

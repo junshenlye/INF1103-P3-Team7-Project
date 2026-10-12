@@ -115,7 +115,7 @@ try {
   assert.match(await page.locator('.week-heading.recess').innerText(), /RECESS\s+7/);
   assert.equal(await page.getByRole('tab', { name: /INF1103/ }).count(), 1);
   assert.equal(await page.getByRole('tabpanel').count(), 1);
-  await page.getByRole('heading', { name: 'This week, simply' }).waitFor();
+  assert.equal(await page.locator('.plan-preview').count(), 0);
   await page
     .getByText('One screenshot could not be read.', { exact: false })
     .waitFor();
@@ -131,14 +131,14 @@ try {
   );
   assert.equal(recommendationRequests, 0);
   await page
-    .getByRole('heading', { name: /assessment date.*still unknown/ })
+    .getByRole('heading', { name: 'Dates to confirm' })
     .waitFor();
   assert.equal(await page.locator('.week-plan[open]').count(), 1);
 
   await page.reload();
   await page.getByText('Keep Week 7 free for recess.', { exact: true }).waitFor();
   await page.getByRole('button', { name: '← Assessments' }).click();
-  await page.getByRole('heading', { name: 'Your study focus' }).waitFor();
+  await page.getByRole('heading', { name: 'Your assessments.' }).waitFor();
   assert.equal(await page.evaluate(() => localStorage.length), 0);
 
   await page.setViewportSize({ width: 390, height: 844 });
