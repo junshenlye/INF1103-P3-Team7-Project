@@ -245,29 +245,33 @@ def process_payload(payload, base_directory=None):
     if valid_modules is None or not valid_modules:
         return None, errors
 
-    # Keep paths in module order so copied results map back by position.
-    file_paths = []
-    for module in valid_modules:
-        file_paths.append(module.get("file_path"))
-
-    stored_paths, image_errors = validate_and_store_images(
-        file_paths,
-        base_directory=base_directory,
-    )
-    errors.extend(image_errors)
-
+    # Each module may have several evidence images. The older ``file_path``
+    # field remains supported so existing CLI payloads continue to work.
     processed_modules = []
-    for position, stored_path in enumerate(stored_paths):
-        # Failed copies are reported through errors, not sent to the AI manager.
-        if stored_path is None:
-            continue
+    for module in valid_modules:
+        file_paths = module.get("file_paths")
+        if not isinstance(file_paths, list) or not file_paths:
+            file_paths = [module.get("file_path")]
 
-        module = valid_modules[position]
+        stored_paths, image_errors = validate_and_store_images(
+            file_paths,
+            base_directory=base_directory,
+        )
+        errors.extend(image_errors)
+        stored_paths = [path for path in stored_paths if path is not None]
+
+        # A module can continue when at least one of its evidence images is
+        # valid. Individual image failures stay in the shared hard-error list.
+        if not stored_paths:
+            continue
         processed_modules.append(
             {
                 "module_title": module["module_title"],
                 "credit": module["credit"],
-                "stored_file_path": stored_path,
+                # Keep the original key for callers that only understand one
+                # evidence image. AI Manager uses the complete list below.
+                "stored_file_path": stored_paths[0],
+                "stored_file_paths": stored_paths,
             }
         )
 

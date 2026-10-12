@@ -30,6 +30,7 @@ def main(argv=None):
     # usable assessment result.
     project_id = None
     run_id = None
+    study_plan = None
     source_hashes = {}
     model_name = f"{ai_manager.RELEVANCE_MODEL}+{ai_manager.REASONING_MODEL}"
     if data_manager.is_configured():
@@ -56,40 +57,52 @@ def main(argv=None):
         if project_id is not None:
             try:
                 source_hashes = {
-                    module["module_title"]: data_manager.hash_file(
-                        module["stored_file_path"]
+                    module["module_title"]: data_manager.hash_files(
+                        module.get("stored_file_paths")
+                        or [module["stored_file_path"]]
                     )
                     for module in payload["modules"]
                 }
-                cached_modules = [
-                    data_manager.find_cached_module(
-                        module["module_title"],
-                        source_hashes[module["module_title"]],
-                        ai_manager.PROMPT_VERSION,
-                        model_name,
-                    )
-                    for module in payload["modules"]
-                ]
             except (OSError, data_manager.DataManagerError) as error:
                 errors.append(data_manager.format_data_error(error))
-                cached_modules = []
-        else:
-            cached_modules = []
 
-        if cached_modules and all(cached_modules):
-            LOGGER.info("AI Manager reused %d cached module(s)", len(cached_modules))
-            payload = {
-                "module_count": len(cached_modules),
-                "modules": cached_modules,
-            }
-        else:
-            payload, errors = asyncio.run(
-                ai_manager.process_payload(payload, errors)
-            )
+        # Every submitted module goes through Qwen. Stored results are retained
+        # for history only and never bypass the assignment's AI processing step.
+        payload, errors = asyncio.run(
+            ai_manager.process_payload(payload, errors)
+        )
 
     if payload is not None:
         current_stage = "Logic Manager"
         payload, errors = logic_manager.process_payload(payload, errors)
+
+    # Logic Manager's complete schedule becomes the reasoning context for one
+    # automatic trimester plan. Failure keeps the factual schedule available.
+    if payload is not None:
+        current_stage = "AI Study Plan"
+        study_preferences = logic_manager.normalize_study_preferences(
+            logic_manager.DEFAULT_STUDY_PREFERENCES
+        )
+        raw_study_plan, errors = asyncio.run(
+            ai_manager.process_recommendation(
+                payload,
+                logic_manager.DEFAULT_RECOMMENDATION_TYPE,
+                study_preferences,
+                errors,
+            )
+        )
+        if raw_study_plan is not None:
+            study_plan, errors = logic_manager.process_recommendation(
+                raw_study_plan,
+                logic_manager.DEFAULT_RECOMMENDATION_TYPE,
+                payload,
+                study_preferences,
+                errors,
+            )
+        if study_plan is not None:
+            payload = dict(payload)
+            payload["study_plan"] = study_plan
+            payload["study_preferences"] = study_preferences
 
     if run_id is not None:
         try:
@@ -101,6 +114,20 @@ def main(argv=None):
                 source_hashes=source_hashes,
                 prompt_version=ai_manager.PROMPT_VERSION,
                 model_name=model_name,
+            )
+        except data_manager.DataManagerError as error:
+            errors.append(data_manager.format_data_error(error))
+
+    if project_id is not None and study_plan is not None:
+        try:
+            data_manager.save_recommendation(
+                project_id,
+                logic_manager.DEFAULT_RECOMMENDATION_TYPE,
+                payload["modules"],
+                study_preferences,
+                study_plan,
+                ai_manager.RECOMMENDATION_PROMPT_VERSION,
+                ai_manager.REASONING_MODEL,
             )
         except data_manager.DataManagerError as error:
             errors.append(data_manager.format_data_error(error))

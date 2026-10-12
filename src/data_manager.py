@@ -17,8 +17,9 @@ from psycopg.types.json import Jsonb
 DATABASE_ENVIRONMENT_VARIABLE = "DATABASE_URL"
 
 
-class DataManagerError(RuntimeError):
-    """Describe one database failure without exposing PostgreSQL internals."""
+# Use a built-in exception through a descriptive alias. This keeps callers
+# readable while satisfying the project's functions-only requirement.
+DataManagerError = RuntimeError
 
 
 def format_data_error(error):
@@ -168,8 +169,8 @@ def save_pipeline_result(
 ):
     """Atomically save module revisions and complete a pipeline run.
 
-    The first revision of a module becomes confirmed automatically. Later AI
-    runs remain candidates until a student explicitly confirms them.
+    The newest successful revision becomes active automatically. Older
+    revisions remain stored for audit history but are no longer displayed.
     """
     source_hashes = source_hashes or {}
     modules = payload.get("modules", []) if isinstance(payload, dict) else []
@@ -187,8 +188,7 @@ def save_pipeline_result(
                     module_title = module["module_title"]
                     cursor.execute(
                         """
-                        SELECT COALESCE(MAX(revision), 0) AS latest_revision,
-                               COALESCE(BOOL_OR(is_confirmed), FALSE) AS has_confirmed
+                        SELECT COALESCE(MAX(revision), 0) AS latest_revision
                         FROM module_results
                         WHERE project_id = %s AND module_title = %s
                         """,
@@ -196,7 +196,14 @@ def save_pipeline_result(
                     )
                     revision_state = cursor.fetchone()
                     revision = revision_state["latest_revision"] + 1
-                    is_confirmed = not revision_state["has_confirmed"]
+                    cursor.execute(
+                        """
+                        UPDATE module_results SET is_confirmed = FALSE
+                        WHERE project_id = %s AND module_title = %s
+                          AND is_confirmed
+                        """,
+                        (project_id, module_title),
+                    )
                     cursor.execute(
                         """
                         INSERT INTO module_results (
@@ -215,7 +222,7 @@ def save_pipeline_result(
                             prompt_version,
                             model_name,
                             revision,
-                            is_confirmed,
+                            True,
                             Jsonb(module),
                         ),
                     )
@@ -251,39 +258,6 @@ def save_pipeline_result(
         raise DataManagerError("Pipeline result has an invalid structure.") from error
     except psycopg.Error as error:
         raise DataManagerError("Could not save the pipeline result.") from error
-
-
-def find_cached_module(
-    module_title,
-    source_hash,
-    prompt_version,
-    model_name,
-    database_url=None,
-):
-    """Return a confirmed extraction for identical input and model settings."""
-    if not source_hash:
-        return None
-    try:
-        with create_connection(database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT module_payload
-                    FROM module_results
-                    WHERE module_title = %s
-                      AND source_hash = %s
-                      AND prompt_version = %s
-                      AND model_name = %s
-                      AND is_confirmed
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    """,
-                    (module_title, source_hash, prompt_version, model_name),
-                )
-                row = cursor.fetchone()
-                return row["module_payload"] if row else None
-    except psycopg.Error as error:
-        raise DataManagerError("Could not check the extraction cache.") from error
 
 
 def get_confirmed_modules(project_id, database_url=None):
@@ -444,7 +418,7 @@ def save_confirmed_module_edit(project_id, module, database_url=None):
 
 
 def calculate_revision_hash(modules):
-    """Return a deterministic hash for recommendation cache and audit records."""
+    """Return a deterministic module hash for recommendation audit records."""
     canonical = json.dumps(modules, sort_keys=True, separators=(",", ":"))
     return sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -578,4 +552,12 @@ def hash_file(file_path):
     with Path(file_path).open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def hash_files(file_paths):
+    """Return one order-sensitive digest for a module's evidence images."""
+    digest = sha256()
+    for file_path in file_paths:
+        digest.update(hash_file(file_path).encode("ascii"))
     return digest.hexdigest()

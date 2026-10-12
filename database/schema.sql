@@ -42,10 +42,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_confirmed_module_revision
     ON module_results(project_id, module_title)
     WHERE is_confirmed;
 
-CREATE INDEX IF NOT EXISTS module_result_cache_lookup
-    ON module_results(source_hash, prompt_version, model_name)
-    WHERE is_confirmed;
-
 CREATE TABLE IF NOT EXISTS recommendations (
     id BIGSERIAL PRIMARY KEY,
     project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
