@@ -1829,32 +1829,12 @@ main>.page-heading,main>.welcome,main>.workspace-hero {
 a.milestone { text-decoration:none; display:block; }
 #upload-form > .primary { display:block; margin-top:22px; }
 @media(max-width:600px) { .workflow-steps { gap:16px; justify-content:space-between; font-size:9px; } .workflow-steps li { flex-direction:column; gap:5px; text-align:center; } .workflow-steps li[aria-current]::before { display:none; } }
-.ai-panel { background:#f0ecf5; border-color:#d6cce2; }
-.ai-panel .eyebrow,.weekly-plan>.eyebrow { color:#70588b; }
 .fact-panel { border-color:#b8c9b2; }
 .unknown-panel { background:#f3ead3; border-color:#dfcfa2; }
 .uncertain-note { color:#835a1b!important; font-size:12px!important; }
 .message.error { background:#f5e3df; border-color:#d4a59c; color:#942f29; }
 
 /* Keep the generated plan calm: suggestions first, detail only when requested. */
-.plan-preview ul {
-  list-style:none;
-  margin:18px 0;
-  padding:0;
-  border-top:1px solid #d6cce2
-}
-.plan-preview li {
-  display:flex;
-  justify-content:space-between;
-  gap:18px;
-  padding:11px 0;
-  border-bottom:1px solid #d6cce2;
-  font-size:13px
-}
-.plan-preview .more-row {
-  justify-content:flex-start;
-  color:var(--muted)
-}
 .plan-suggestions {
   margin-bottom:26px
 }
@@ -2006,12 +1986,6 @@ a.milestone { text-decoration:none; display:block; }
 .priority-low {
   background:#e0e8d8;
   color:#4a6744
-}
-.week-note {
-  margin:0;
-  padding:0 20px 18px;
-  color:#835a1b;
-  font-size:11px
 }
 .unknown-summary {
   display:flex;

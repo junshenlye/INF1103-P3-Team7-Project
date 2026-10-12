@@ -31,7 +31,7 @@ RELEVANCE_MODEL = "qwen3.7-flash"
 REASONING_MODEL = "qwen3.7-plus"
 MAX_CONCURRENT_REQUESTS = 4
 PROMPT_VERSION = "2026-10-12-v3"
-RECOMMENDATION_PROMPT_VERSION = "2026-10-12-r4"
+RECOMMENDATION_PROMPT_VERSION = "2026-10-13-r5"
 LOGGER = logging.getLogger(__name__)
 
 RECOMMENDATION_TYPES = {
@@ -177,6 +177,17 @@ def parse_json_content(content):
         raise ValueError("Model returned invalid JSON.") from error
 
 
+def validate_json_object(value, response_name):
+    """Return a parsed model response only when its root is a JSON object.
+
+    AI Manager validates the transport-level response contract. Logic Manager
+    remains responsible for domain fields, business rules and scheduling.
+    """
+    if not isinstance(value, dict):
+        raise ValueError(f"{response_name} response must be a JSON object.")
+    return value
+
+
 async def check_relevance(client, module_title, image_data, semaphore):
     """Return Qwen Flash's parsed relevance output for one module image.
 
@@ -193,7 +204,7 @@ async def check_relevance(client, module_title, image_data, semaphore):
         task_name=f"{module_title} relevance",
         json_mode=True,
     )
-    return parse_json_content(content)
+    return validate_json_object(parse_json_content(content), "Relevance")
 
 
 async def interpret_assessments(client, module_title, image_data, semaphore):
@@ -237,7 +248,7 @@ async def normalize_assessments(
         semaphore=semaphore,
         task_name=f"{module_title} normalization",
     )
-    return parse_json_content(content)
+    return validate_json_object(parse_json_content(content), "Normalization")
 
 
 async def process_module(module, client, semaphore):
@@ -387,7 +398,7 @@ async def generate_recommendation(
         semaphore=semaphore,
         task_name=f"{recommendation_type} recommendation",
     )
-    return parse_json_content(content)
+    return validate_json_object(parse_json_content(content), "Recommendation")
 
 
 async def process_recommendation(

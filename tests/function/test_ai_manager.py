@@ -98,6 +98,16 @@ def test_multimodal_request_includes_every_module_evidence_image():
     ]
 
 
+def test_structured_ai_response_requires_a_json_object():
+    """Parsed arrays are rejected before domain logic consumes the response."""
+    try:
+        ai_manager.validate_json_object([], "Normalization")
+    except ValueError as error:
+        assert str(error) == "Normalization response must be a JSON object."
+    else:
+        raise AssertionError("A non-object AI response was accepted.")
+
+
 def test_http_task_logs_provider_time(monkeypatch, caplog):
     """HTTP logs identify the task, model and measured provider duration."""
     clock_values = iter([10.0, 12.345])

@@ -202,6 +202,7 @@ def test_pipeline_persists_successful_result(monkeypatch, tmp_path, database_url
             }
         ],
         "weeks": [],
+        "flexible_items": [],
     }
 
     async def fake_recommendation(payload, recommendation_type, preferences, errors):

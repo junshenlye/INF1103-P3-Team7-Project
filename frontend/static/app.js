@@ -1,5 +1,5 @@
 import { request } from './api.js';
-import { weeks, escape as e, assessments, planItems, weekLabel, weightLabel, capacity, newestPlan } from './model.js';
+import { weeks, escape as e, assessments, datedPlanItems, weekLabel, weightLabel, capacity, newestPlan } from './model.js';
 
 const app = document.querySelector('#app');
 const state = { step: 'upload', projects: [], project: null, schedule: null, busy: null, error: '', warnings: [], plan: null, moduleTab: 0 };
@@ -50,7 +50,7 @@ function timeline() {
 }
 function scheduleView() {
   const unresolved = state.schedule?.unscheduled || [];
-  return `<div class="page-heading"><div><p class="eyebrow">${e(state.project.name)}</p><h1>Your <em>assessments.</em></h1></div>${button('View study plan ↗', 'plan', '', 'primary')}</div>${planSummary()}<section class="paper fact-panel">${timeline()}${unresolved.length ? `<p class="warning">${unresolved.length} assessment(s) have no confirmed week. They are listed below.</p>` : ''}</section>${moduleBrowser()}`;
+  return `<div class="page-heading"><div><p class="eyebrow">${e(state.project.name)}</p><h1>Your <em>assessments.</em></h1></div>${button('View study plan ↗', 'plan', '', 'primary')}</div><section class="paper fact-panel">${timeline()}${unresolved.length ? `<p class="warning">${unresolved.length} assessment(s) have no confirmed week. They are listed below.</p>` : ''}</section>${moduleBrowser()}`;
 }
 function moduleBrowser() {
   const selected = activeModule();
@@ -69,28 +69,18 @@ function studyPlanIssue() {
   }
   return '';
 }
-function planSummary() {
-  const record = state.plan;
-  if (!record) return `<section class="paper ai-panel"><p class="eyebrow">Study plan</p><p>Your assessment schedule is ready, but the study plan could not be generated.</p>${studyPlanIssue() ? `<p class="hint">Reason: ${e(studyPlanIssue())}</p>` : ''}</section>`;
-  const current = record.preferences.current_week;
-  const items = planItems(record);
-  const thisWeek = items.filter(i => i.week === current);
-  const visibleItems = thisWeek.slice(0, 3);
-  const extraCount = thisWeek.length - visibleItems.length;
-  const totals = capacity(items, record.preferences.available_hours_per_week);
-  return `<section class="paper ai-panel plan-preview"><p class="eyebrow">Study plan</p><h2>This week, simply</h2><h3>Week ${current}</h3>${visibleItems.length ? `<ul>${visibleItems.map(i => `<li><strong>${e(i.title)}</strong><span>${i.estimated_hours}h</span></li>`).join('')}${extraCount > 0 ? `<li class="more-row">+ ${extraCount} more action${extraCount === 1 ? '' : 's'}</li>` : ''}</ul>` : '<p>No planned actions this week.</p>'}<p class="hint">${totals.find(w => w.week === current)?.hours || 0}h of ${record.preferences.available_hours_per_week}h planned.</p>${button('See the full plan ↗', 'plan')}</section>`;
-}
 function unknownSection() {
   const unknown = state.schedule?.unscheduled || [];
   if (!unknown.length) return '';
   const moduleCounts = unknown.reduce((groups, item) => ({ ...groups, [item.module_title]: (groups[item.module_title] || 0) + 1 }), {});
   const uniqueItems = [...unknown.reduce((items, item) => {
-    const key = `${item.module_title}\u0000${item.name}`;
+    const groupedName = item.name.replace(/\s+(?:#?\d+|[IVX]+)$/i, '').trim() || item.name;
+    const key = `${item.module_title}\u0000${item.assessment_type}\u0000${groupedName}`;
     const existing = items.get(key);
-    items.set(key, existing ? { ...existing, count: existing.count + 1 } : { ...item, count: 1 });
+    items.set(key, existing ? { ...existing, count: existing.count + 1 } : { ...item, name: groupedName, count: 1 });
     return items;
   }, new Map()).values()];
-  return `<section class="paper unknown-panel compact-unknown"><div class="unknown-summary"><div><p class="eyebrow">Worth checking</p><h2>${unknown.length} assessment date${unknown.length === 1 ? '' : 's'} still unknown</h2><p>The plan treats these weeks as suggestions, not deadlines.</p></div><div class="unknown-counts">${Object.entries(moduleCounts).map(([module, count]) => `<span><strong>${e(module)}</strong>${count}</span>`).join('')}</div></div><details><summary>See affected assessments</summary><ul>${uniqueItems.map(item => `<li>${e(item.module_title)} · ${e(item.name)}${item.count > 1 ? ` ×${item.count}` : ''}</li>`).join('')}</ul></details></section>`;
+  return `<section class="paper unknown-panel compact-unknown"><div class="unknown-summary"><div><p class="eyebrow">Worth checking</p><h2>Dates to confirm</h2><p>${unknown.length} assessment${unknown.length === 1 ? '' : 's'} kept out of the numbered plan.</p></div><div class="unknown-counts">${Object.entries(moduleCounts).map(([module, count]) => `<span><strong>${e(module)}</strong>${count}</span>`).join('')}</div></div><details><summary>See affected assessments</summary><ul>${uniqueItems.map(item => `<li>${e(item.module_title)} · ${e(item.name)}${item.count > 1 ? ` ×${item.count}` : ''}</li>`).join('')}</ul></details></section>`;
 }
 function planView() {
   const record = state.plan;
@@ -117,21 +107,18 @@ function planSuggestions(record) {
     : [];
 }
 function planResult(record) {
-  const items = planItems(record);
+  const items = datedPlanItems(record, state.schedule?.unscheduled);
   const totals = capacity(items, record.preferences.available_hours_per_week);
   const activeWeeks = totals.filter(week => week.hours > 0);
-  const currentWeek = record.preferences.current_week;
-  const currentItems = items.filter(item => item.week === currentWeek);
-  const currentHours = totals.find(week => week.week === currentWeek)?.hours || 0;
-  const firstUpcomingWeek = activeWeeks.find(week => week.week >= currentWeek)?.week || activeWeeks[0]?.week;
+  const plannedHours = Math.round(items.reduce((sum, item) => sum + item.estimated_hours, 0) * 100) / 100;
+  const firstUpcomingWeek = activeWeeks[0]?.week;
   const suggestions = planSuggestions(record);
   const weeklyPlan = activeWeeks.map(week => {
     const weekItems = items.filter(item => item.week === week.week);
     const focus = record.recommendation_payload.weeks?.find(value => value.week === week.week)?.focus || 'Planned actions';
-    const suggestedCount = weekItems.filter(item => state.schedule?.unscheduled.some(assessment => assessment.assessment_id === item.assessment_id)).length;
-    return `<details class="week-plan" ${week.week === firstUpcomingWeek ? 'open' : ''}><summary><span><small>Week ${week.week}</small><strong>${e(focus)}</strong></span><span>${week.hours}h · ${weekItems.length} action${weekItems.length === 1 ? '' : 's'}</span></summary><ul class="tasks compact-tasks">${weekItems.map(item => `<li><div class="task-title"><h3>${e(item.title)}</h3><span class="priority priority-${e(item.priority)}">${e(item.priority)}</span></div><p class="task-context"><strong>${e(item.module_title || 'All modules')}</strong><span>${item.estimated_hours}h</span></p></li>`).join('')}</ul>${suggestedCount ? `<p class="week-note">${suggestedCount} action${suggestedCount === 1 ? '' : 's'} use suggested timing because the assessment date is not confirmed.</p>` : ''}</details>`;
+    return `<details class="week-plan" ${week.week === firstUpcomingWeek ? 'open' : ''}><summary><span><small>Week ${week.week}</small><strong>${e(focus)}</strong></span><span>${week.hours}h · ${weekItems.length} action${weekItems.length === 1 ? '' : 's'}</span></summary><ul class="tasks compact-tasks">${weekItems.map(item => `<li><div class="task-title"><h3>${e(item.title)}</h3><span class="priority priority-${e(item.priority)}">${e(item.priority)}</span></div><p class="task-context"><strong>${e(item.module_title || 'All modules')}</strong><span>${item.estimated_hours}h</span></p></li>`).join('')}</ul></details>`;
   }).join('');
-  return `<section class="plan-suggestions"><div class="section-heading"><div><p class="eyebrow">Suggested focus</p><h2>Suggestions</h2></div></div><div class="suggestion-grid">${suggestions.map(item => `<article class="suggestion-card"><h3>${e(item.title)}</h3><p>${e(item.suggestion)}</p></article>`).join('')}</div></section><div class="stats plan-stats"><div><span>This week</span><strong>${currentItems.length}</strong><small>actions</small></div><div><span>Time planned</span><strong>${currentHours}h</strong><small>of ${record.preferences.available_hours_per_week}h</small></div><div><span>Whole plan</span><strong>${items.length}</strong><small>actions</small></div></div><section class="weekly-plan"><div class="section-heading"><div><p class="eyebrow">Weekly plan</p><h2>Open a week when you need it</h2></div><p>${activeWeeks.length} active week${activeWeeks.length === 1 ? '' : 's'}</p></div>${weeklyPlan || '<p>No study actions were returned.</p>'}</section>`;
+  return `<section class="plan-suggestions"><div class="section-heading"><div><p class="eyebrow">Suggested focus</p><h2>Suggestions</h2></div></div><div class="suggestion-grid">${suggestions.map(item => `<article class="suggestion-card"><h3>${e(item.title)}</h3><p>${e(item.suggestion)}</p></article>`).join('')}</div></section><div class="stats plan-stats"><div><span>Active weeks</span><strong>${activeWeeks.length}</strong><small>with useful actions</small></div><div><span>Planned time</span><strong>${plannedHours}h</strong><small>across the trimester</small></div><div><span>Actions</span><strong>${items.length}</strong><small>from confirmed timing</small></div></div><section class="weekly-plan"><div class="section-heading"><div><p class="eyebrow">Plan by week</p><h2>Open only what you need</h2></div><p>Unknown dates stay outside this plan.</p></div>${weeklyPlan || '<p>No dated study actions were returned.</p>'}</section>`;
 }
 function syncUrl() {
   const url = new URL(location.href);

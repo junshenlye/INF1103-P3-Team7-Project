@@ -61,7 +61,7 @@ RECOMMENDATION_PRIORITIES = {"high", "medium", "low"}
 DEFAULT_RECOMMENDATION_TYPE = "trimester_revision_plan"
 DEFAULT_STUDY_PREFERENCES = {
     "available_hours_per_week": 8,
-    "current_week": 1,
+    "current_week": None,
     "preferred_days": [],
 }
 
@@ -640,11 +640,13 @@ def normalize_study_preferences(preferences):
         raise ValueError("Study preferences must be a dictionary.")
 
     available_hours = preferences.get("available_hours_per_week", 8)
-    current_week = preferences.get("current_week", 1)
+    current_week = preferences.get("current_week")
     if type(available_hours) not in (int, float) or not 0 < available_hours <= 168:
         raise ValueError("available_hours_per_week must be between 0 and 168.")
-    if type(current_week) is not int or not 1 <= current_week <= 14:
-        raise ValueError("current_week must be an integer from 1 to 14.")
+    if current_week is not None and (
+        type(current_week) is not int or not 1 <= current_week <= 14
+    ):
+        raise ValueError("current_week must be null or an integer from 1 to 14.")
 
     preferred_days = preferences.get("preferred_days", [])
     if not isinstance(preferred_days, list) or not all(
@@ -752,9 +754,15 @@ def normalize_plan_item(
     assessment_modules,
     recess_weeks,
     recess_assessment_ids,
+    unscheduled_assessment_ids,
     expected_week=None,
 ):
-    """Validate and return one recommendation item without adding facts."""
+    """Validate one recommendation item without inventing assessment timing.
+
+    Advice linked to an assessment with no confirmed week becomes flexible
+    work. Any numbered week returned by the model is discarded so it cannot be
+    mistaken for a source-backed deadline or preparation week.
+    """
     if not isinstance(item, dict):
         raise ValueError("Recommendation contains an invalid plan item.")
     title = item.get("title")
@@ -780,12 +788,18 @@ def normalize_plan_item(
         and assessment_modules[assessment_id] != resolved_module_title
     ):
         raise ValueError("Recommendation links an assessment to the wrong module.")
-    if type(week) is not int or not 1 <= week <= 14:
-        raise ValueError("Recommendation week must be between 1 and 14.")
-    if expected_week is not None and week != expected_week:
-        raise ValueError("Recommendation item week does not match its week group.")
-    if week in recess_weeks and assessment_id not in recess_assessment_ids:
-        raise ValueError("Recommendation adds work to a recess week.")
+
+    timing_status = "recommended"
+    if assessment_id in unscheduled_assessment_ids:
+        week = None
+        timing_status = "date_unknown"
+    else:
+        if type(week) is not int or not 1 <= week <= 14:
+            raise ValueError("Recommendation week must be between 1 and 14.")
+        if expected_week is not None and week != expected_week:
+            raise ValueError("Recommendation item week does not match its week group.")
+        if week in recess_weeks and assessment_id not in recess_assessment_ids:
+            raise ValueError("Recommendation adds work to a recess week.")
     if type(estimated_hours) not in (int, float) or estimated_hours <= 0:
         raise ValueError("Recommendation hours must be a positive number.")
     if priority not in RECOMMENDATION_PRIORITIES:
@@ -801,6 +815,7 @@ def normalize_plan_item(
         "estimated_hours": round(estimated_hours, 2),
         "priority": priority,
         "reason": reason.strip(),
+        "timing_status": timing_status,
     }
 
 
@@ -815,8 +830,8 @@ def validate_weekly_hours(items, available_hours):
     return totals
 
 
-def recommendation_recess_rules(project_payload):
-    """Return recess weeks and assessments explicitly placed within them."""
+def recommendation_schedule_rules(project_payload):
+    """Return the confirmed timing boundaries used to validate AI advice."""
     schedule = project_payload.get("schedule", {})
     recess_weeks = {
         week for week in schedule.get("recess_weeks", [])
@@ -829,7 +844,27 @@ def recommendation_recess_rules(project_payload):
         for item in week.get("items", [])
         if isinstance(item.get("assessment_id"), str)
     }
-    return recess_weeks, explicit_assessments
+    unscheduled_assessments = {
+        item.get("assessment_id")
+        for item in schedule.get("unscheduled", [])
+        if isinstance(item.get("assessment_id"), str)
+    }
+    return recess_weeks, explicit_assessments, unscheduled_assessments
+
+
+def deduplicate_flexible_items(items):
+    """Return at most six distinct date-unknown preparation suggestions."""
+    unique_items = []
+    seen = set()
+    for item in items:
+        key = (item["assessment_id"], item["title"].casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_items.append(item)
+        if len(unique_items) == 6:
+            break
+    return unique_items
 
 
 def normalize_highlights(recommendation):
@@ -891,9 +926,11 @@ def normalize_recommendation_output(
     module_titles, assessment_modules = collect_recommendation_references(
         project_payload
     )
-    recess_weeks, recess_assessment_ids = recommendation_recess_rules(
-        project_payload
-    )
+    (
+        recess_weeks,
+        recess_assessment_ids,
+        unscheduled_assessment_ids,
+    ) = recommendation_schedule_rules(project_payload)
     highlights = normalize_highlights(recommendation)
 
     if recommendation_type == "work_checklist":
@@ -907,11 +944,15 @@ def normalize_recommendation_output(
                 assessment_modules,
                 recess_weeks,
                 recess_assessment_ids,
+                unscheduled_assessment_ids,
             )
             for item in raw_items
         ]
         # The checklist is an overview, not a second assessment catalogue.
-        items = validated_items[:12]
+        flexible_items = deduplicate_flexible_items(
+            [item for item in validated_items if item["week"] is None]
+        )
+        items = [item for item in validated_items if item["week"] is not None][:12]
         weekly_hours = validate_weekly_hours(
             items,
             normalized_preferences["available_hours_per_week"],
@@ -921,6 +962,7 @@ def normalize_recommendation_output(
             "summary": summary.strip(),
             "highlights": highlights,
             "items": items,
+            "flexible_items": flexible_items,
             "weekly_hours": weekly_hours,
         }
 
@@ -930,6 +972,7 @@ def normalize_recommendation_output(
     seen_weeks = set()
     weeks = []
     all_items = []
+    flexible_items = []
     for raw_week in raw_weeks:
         if not isinstance(raw_week, dict):
             raise ValueError("Revision plan contains an invalid week.")
@@ -954,12 +997,18 @@ def normalize_recommendation_output(
                 assessment_modules,
                 recess_weeks,
                 recess_assessment_ids,
+                unscheduled_assessment_ids,
                 expected_week=week_number,
             )
             for item in raw_items
         ]
         # Keep weekly advice scannable even if the model returns extra detail.
-        items = validated_items[:3]
+        flexible_items.extend(
+            item for item in validated_items if item["week"] is None
+        )
+        items = [item for item in validated_items if item["week"] is not None][:3]
+        if not items:
+            continue
         all_items.extend(items)
         weeks.append(
             {
@@ -972,6 +1021,24 @@ def normalize_recommendation_output(
                 ),
             }
         )
+
+    raw_flexible_items = recommendation.get("flexible_items", [])
+    if not isinstance(raw_flexible_items, list):
+        raise ValueError("Flexible recommendation items must be an array.")
+    for item in raw_flexible_items:
+        normalized_item = normalize_plan_item(
+            item,
+            module_titles,
+            assessment_modules,
+            recess_weeks,
+            recess_assessment_ids,
+            unscheduled_assessment_ids,
+        )
+        if normalized_item["week"] is not None:
+            raise ValueError(
+                "Flexible recommendation item must reference an unscheduled assessment."
+            )
+        flexible_items.append(normalized_item)
     validate_weekly_hours(
         all_items,
         normalized_preferences["available_hours_per_week"],
@@ -982,6 +1049,7 @@ def normalize_recommendation_output(
         "summary": summary.strip(),
         "highlights": highlights,
         "weeks": weeks,
+        "flexible_items": deduplicate_flexible_items(flexible_items),
     }
 
 

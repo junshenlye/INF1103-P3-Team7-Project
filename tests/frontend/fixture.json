@@ -276,7 +276,7 @@
         "status": "candidate",
         "preferences": {
           "available_hours_per_week": 8,
-          "current_week": 1,
+          "current_week": null,
           "preferred_days": []
         },
         "recommendation_payload": {
