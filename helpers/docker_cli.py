@@ -25,17 +25,34 @@ def stage_payload(payload_path, staging_directory):
 
     staged_modules = []
     for position, module in enumerate(modules):
-        if not isinstance(module, dict) or not isinstance(module.get("file_path"), str):
-            raise ValueError(f"Module at position {position} has no file_path.")
-        source = Path(module["file_path"]).expanduser()
-        if not source.is_absolute():
-            source = payload_path.parent / source
-        source = source.resolve()
-        suffix = source.suffix.lower()
-        staged_name = f"{uuid.uuid4().hex}{suffix}"
-        shutil.copyfile(source, staging_directory / staged_name)
+        if not isinstance(module, dict):
+            raise ValueError(f"Module at position {position} is invalid.")
+        file_paths = module.get("file_paths")
+        uses_multiple_image_contract = isinstance(file_paths, list)
+        if not isinstance(file_paths, list) or not file_paths:
+            file_path = module.get("file_path")
+            file_paths = [file_path] if isinstance(file_path, str) else []
+        if not file_paths or not all(isinstance(path, str) for path in file_paths):
+            raise ValueError(
+                f"Module at position {position} has no evidence images."
+            )
+
+        staged_names = []
+        for file_path in file_paths:
+            source = Path(file_path).expanduser()
+            if not source.is_absolute():
+                source = payload_path.parent / source
+            source = source.resolve()
+            suffix = source.suffix.lower()
+            staged_name = f"{uuid.uuid4().hex}{suffix}"
+            shutil.copyfile(source, staging_directory / staged_name)
+            staged_names.append(staged_name)
         staged_module = dict(module)
-        staged_module["file_path"] = staged_name
+        if uses_multiple_image_contract:
+            staged_module.pop("file_path", None)
+            staged_module["file_paths"] = staged_names
+        else:
+            staged_module["file_path"] = staged_names[0]
         staged_modules.append(staged_module)
 
     staged_payload = {

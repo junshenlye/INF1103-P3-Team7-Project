@@ -46,7 +46,7 @@ def add_frontend_headers(response):
         "http://localhost:5173",
     )
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,OPTIONS"
     return response
 
 
@@ -123,19 +123,31 @@ def process_project(project_id):
         for position, module in enumerate(metadata):
             if not isinstance(module, dict):
                 return error_response(f"Module {position} is invalid.", 400)
-            file_field = module.get("file_field")
-            upload = request.files.get(file_field) if isinstance(file_field, str) else None
-            if upload is None or not upload.filename:
-                return error_response(f"Module {position} has no uploaded image.", 400)
-            safe_name = secure_filename(upload.filename)
-            suffix = Path(safe_name).suffix.lower()
-            stored_name = f"{uuid.uuid4().hex}{suffix}"
-            upload.save(directory / stored_name)
+            file_fields = module.get("file_fields")
+            if not isinstance(file_fields, list) or not file_fields:
+                file_field = module.get("file_field")
+                file_fields = [file_field] if isinstance(file_field, str) else []
+            uploads = [request.files.get(field) for field in file_fields]
+            if not uploads or any(
+                upload is None or not upload.filename for upload in uploads
+            ):
+                return error_response(
+                    f"Module {position} has missing uploaded evidence.",
+                    400,
+                )
+
+            stored_names = []
+            for upload in uploads:
+                safe_name = secure_filename(upload.filename)
+                suffix = Path(safe_name).suffix.lower()
+                stored_name = f"{uuid.uuid4().hex}{suffix}"
+                upload.save(directory / stored_name)
+                stored_names.append(stored_name)
             modules.append(
                 {
                     "module_title": module.get("module_title"),
                     "credit": module.get("credit"),
-                    "file_path": stored_name,
+                    "file_paths": stored_names,
                 }
             )
 
@@ -222,23 +234,35 @@ def recommendations(project_id):
             ),
         }
         errors = list(schedule_errors)
-        recommendation, errors = asyncio.run(
+        normalized_preferences = logic_manager.normalize_study_preferences(
+            preferences
+        )
+        raw_recommendation, errors = asyncio.run(
             ai_manager.process_recommendation(
                 project_payload,
                 recommendation_type,
-                preferences,
+                normalized_preferences,
                 errors,
             )
         )
+        recommendation = None
+        if raw_recommendation is not None:
+            recommendation, errors = logic_manager.process_recommendation(
+                raw_recommendation,
+                recommendation_type,
+                project_payload,
+                normalized_preferences,
+                errors,
+            )
         if recommendation is None:
             return jsonify({"payload": None, "errors": errors}), 422
         stored = data_manager.save_recommendation(
             project_id,
             recommendation_type,
             modules,
-            ai_manager.normalize_study_preferences(preferences),
+            normalized_preferences,
             recommendation,
-            ai_manager.PROMPT_VERSION,
+            ai_manager.RECOMMENDATION_PROMPT_VERSION,
             ai_manager.REASONING_MODEL,
         )
         return jsonify({"payload": json_ready(stored), "errors": errors}), 201
