@@ -1,10 +1,112 @@
 services:
-  stackplan:
-    build: .
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stackplan}
+      POSTGRES_USER: ${POSTGRES_USER:-stackplan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stackplan-local}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - stackplan-data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+  stackplan-cli:
+    build:
+      context: .
+      target: runtime
     image: stackplan
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-stackplan}:${POSTGRES_PASSWORD:-stackplan-local}@database:5432/${POSTGRES_DB:-stackplan}
+    depends_on:
+      database:
+        condition: service_healthy
     volumes:
       - .:/input:ro
     command:
-      - /input/test_payload.json
+      - /input/tests/fixtures/live/one-module.json
+
+  api:
+    image: stackplan
+    build:
+      context: .
+      target: runtime
+    entrypoint:
+      - gunicorn
+      - --bind
+      - 0.0.0.0:8000
+      - --workers
+      - "2"
+      - --timeout
+      - "1800"
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+      - --capture-output
+      - --access-logformat
+      - '%(t)s client=%(h)s request="%(r)s" status=%(s)s bytes=%(b)s duration=%(L)s'
+      - helpers.api_helper:APP
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-stackplan}:${POSTGRES_PASSWORD:-stackplan-local}@database:5432/${POSTGRES_DB:-stackplan}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:5173}
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+    image: stackplan-frontend
+    environment:
+      STACKPLAN_API_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:5173"
+
+  test-database:
+    profiles: ["test"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: stackplan_test
+      POSTGRES_USER: stackplan_test
+      POSTGRES_PASSWORD: stackplan_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stackplan_test -d stackplan_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+  tests:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    environment:
+      DATABASE_URL: postgresql://stackplan_test:stackplan_test@test-database:5432/stackplan_test
+    depends_on:
+      test-database:
+        condition: service_healthy
+    command: ["-q", "-p", "no:cacheprovider"]
+
+volumes:
+  stackplan-data:

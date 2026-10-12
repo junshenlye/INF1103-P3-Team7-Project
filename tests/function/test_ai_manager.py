@@ -1,4 +1,4 @@
-"""Offline tests for asynchronous AI Manager behaviour."""
+"""Function tests for asynchronous AI Manager behaviour."""
 
 import asyncio
 import json
@@ -6,7 +6,7 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from src import ai_manager
+from src import ai_manager, logic_manager
 
 
 def make_response(content):
@@ -80,6 +80,22 @@ def make_normalization(module_title, position=0):
         "notes": [],
         "follow_ups": [],
     }
+
+
+def test_multimodal_request_includes_every_module_evidence_image():
+    """Schedule and weight screenshots are sent in one reasoning context."""
+    messages = ai_manager.create_image_messages(
+        "PROMPT",
+        "INF1102",
+        ["data:image/png;base64,one", "data:image/png;base64,two"],
+    )
+
+    content = messages[0]["content"]
+    assert content[0]["type"] == "text"
+    assert [item["image_url"]["url"] for item in content[1:]] == [
+        "data:image/png;base64,one",
+        "data:image/png;base64,two",
+    ]
 
 
 def test_http_task_logs_provider_time(monkeypatch, caplog):
@@ -172,6 +188,12 @@ def test_concurrent_requests_are_limited_and_output_order_is_preserved(tmp_path)
         module["module_title"] for module in modules
     ]
     assert all(
+        "ai_relevance" in module
+        and "ai_output" in module
+        and "assessment_types" not in module
+        for module in processed_payload["modules"]
+    )
+    assert all(
         stages == ["relevance", "interpretation", "normalization"]
         for stages in completed_stages.values()
     )
@@ -179,7 +201,8 @@ def test_concurrent_requests_are_limited_and_output_order_is_preserved(tmp_path)
     assert errors == ["IO Manager error: earlier module was rejected."]
 
 
-def test_irrelevant_and_failed_modules_do_not_stop_other_modules(tmp_path):
+def test_ai_failures_stop_at_ai_while_logic_rejects_irrelevant_records(tmp_path):
+    """AI Manager parses responses; Logic Manager owns acceptance rules."""
     modules = [make_module(tmp_path, position) for position in range(3)]
     payload = {"module_count": len(modules), "modules": modules}
 
@@ -207,11 +230,23 @@ def test_irrelevant_and_failed_modules_do_not_stop_other_modules(tmp_path):
         ai_manager.process_payload(payload, [], client=fake_client)
     )
 
-    assert processed_payload["module_count"] == 1
-    assert processed_payload["modules"][0]["module_title"] == "MODULE-0"
+    assert processed_payload["module_count"] == 2
+    assert [module["module_title"] for module in processed_payload["modules"]] == [
+        "MODULE-0",
+        "MODULE-1",
+    ]
+    assert processed_payload["modules"][1]["ai_output"] is None
     assert errors == [
-        "AI Manager error: MODULE-1: No assessment information.",
         "AI Manager error: MODULE-2: Inference unavailable.",
+    ]
+
+    logic_payload, errors = logic_manager.process_payload(processed_payload, errors)
+
+    assert logic_payload["module_count"] == 1
+    assert logic_payload["modules"][0]["module_title"] == "MODULE-0"
+    assert errors == [
+        "AI Manager error: MODULE-2: Inference unavailable.",
+        "Logic Manager error: MODULE-1: No assessment information.",
     ]
 
 
@@ -255,7 +290,7 @@ def test_repeated_assessments_expand_and_preserve_group_weight():
         "follow_ups": [],
     }
 
-    module = ai_manager.build_module_output("INF1104", 4, normalized)
+    module = logic_manager.build_module_output("INF1104", 4, normalized)
     tutorial_group = module["assessment_types"][0]
 
     assert tutorial_group["declared_count"] == 10
@@ -281,6 +316,78 @@ def test_repeated_assessments_expand_and_preserve_group_weight():
         ("schedule", "Tutorial"),
         ("weight_percent", "tutorial"),
     }
+
+
+def test_numbered_assessments_split_a_shared_list_of_weeks():
+    """A model-copied week list becomes one week per numbered assessment."""
+    normalized = {
+        "source_coverage": {"status": "partial", "comment": "Part I only."},
+        "assessment_types": [
+            {
+                "type": "quiz",
+                "group_weight_percent": None,
+                "group_weight_scope": "unknown",
+                "group_weight_scope_name": None,
+                "assessments": [
+                    {
+                        "name": f"Lecture Quiz {number}",
+                        "count": 1,
+                        "record_role": "assessment",
+                        "weight_percent": None,
+                        "weight_scope": "unknown",
+                        "weight_scope_name": None,
+                        "schedule": {
+                            "kind": "week_range",
+                            "week": None,
+                            "start_week": 2,
+                            "end_week": 3,
+                            "raw": "Week 2, Week 3",
+                        },
+                        "parent_assessment": None,
+                        "details": None,
+                    }
+                    for number in (1, 2)
+                ],
+            }
+        ],
+        "notes": [],
+        "follow_ups": [],
+    }
+
+    module = logic_manager.build_module_output("INF1102", 6, normalized)
+    quizzes = module["assessment_types"][0]["assessments"]
+
+    assert [quiz["schedule"]["kind"] for quiz in quizzes] == ["week", "week"]
+    assert [quiz["schedule"]["week"] for quiz in quizzes] == [2, 3]
+    assert any(
+        note.startswith("Schedule normalized from a shared list of weeks")
+        for note in module["notes"]
+    )
+
+
+def test_list_like_range_without_safe_mapping_becomes_follow_up():
+    """An ambiguous slash range stays unchanged but cannot pass silently."""
+    normalized = make_normalization("INF1102")
+    project = normalized["assessment_types"][0]["assessments"][0]
+    project["name"] = "Competency Project"
+    project["schedule"] = {
+        "kind": "week_range",
+        "week": None,
+        "start_week": 6,
+        "end_week": 7,
+        "raw": "Week 6/7",
+    }
+
+    module = logic_manager.build_module_output("INF1102", 6, normalized)
+
+    assert module["assessment_types"][0]["assessments"][0]["schedule"][
+        "kind"
+    ] == "week_range"
+    assert any(
+        follow_up["assessment"] == "Competency Project"
+        and follow_up["field"] == "schedule"
+        for follow_up in module["follow_ups"]
+    )
 
 
 def test_parent_assessment_names_become_deterministic_ids():
@@ -348,7 +455,7 @@ def test_parent_assessment_names_become_deterministic_ids():
         ],
     }
 
-    module = ai_manager.build_module_output("UCS1001", 4, normalized)
+    module = logic_manager.build_module_output("UCS1001", 4, normalized)
     parent = module["assessment_types"][0]["assessments"][0]
     child = module["assessment_types"][1]["assessments"][0]
 
@@ -360,7 +467,8 @@ def test_parent_assessment_names_become_deterministic_ids():
     ]
 
 
-def test_all_failed_modules_return_none(tmp_path):
+def test_all_irrelevant_modules_are_rejected_by_logic_manager(tmp_path):
+    """Keep parsed AI output until Logic Manager rejects the module."""
     module = make_module(tmp_path, 0)
 
     async def fake_create(**request):
@@ -372,7 +480,7 @@ def test_all_failed_modules_return_none(tmp_path):
         )
     )
 
-    processed_payload, errors = asyncio.run(
+    parsed_payload, errors = asyncio.run(
         ai_manager.process_payload(
             {"module_count": 1, "modules": [module]},
             [],
@@ -380,8 +488,13 @@ def test_all_failed_modules_return_none(tmp_path):
         )
     )
 
+    assert parsed_payload["module_count"] == 1
+    assert errors == []
+
+    processed_payload, errors = logic_manager.process_payload(parsed_payload, errors)
+
     assert processed_payload is None
-    assert errors == ["AI Manager error: MODULE-0: Not relevant."]
+    assert errors == ["Logic Manager error: MODULE-0: Not relevant."]
 
 
 def test_missing_configuration_adds_one_error(monkeypatch, tmp_path):

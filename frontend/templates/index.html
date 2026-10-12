@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#edece5">
+  <meta name="description" content="Upload module assessments and receive an automatic weekly schedule and study plan.">
+  <title>Stackplan — Make space for what’s next.</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="ambient" aria-hidden="true"></div>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-icon" aria-hidden="true"><i></i><i></i><i></i></span>stackplan</a>
+    <div class="project-picker"><label class="sr-only" for="project-picker">Trimester</label><select id="project-picker" disabled><option>Select a trimester</option></select><button type="button" data-action="restart" class="quiet" id="new-project">Start again ↗</button></div>
+  </header>
+  <ol class="workflow-steps" aria-label="Demo workflow"><li data-step="upload">01 <span>Upload modules</span></li><li data-step="schedule">02 <span>View assessments</span></li><li data-step="plan">03 <span>Review plan</span></li></ol>
+  <div id="app"><main id="main" tabindex="-1"><div class="loading" role="status"><span class="spinner" aria-hidden="true"></span><h1>Opening your workspace</h1></div></main></div>
+  <footer><a class="footer-brand" href="/">stackplan.</a><span>A little more space to think.</span></footer>
+  <noscript><p class="message error">Enable JavaScript to upload screenshots and interact with your plan.</p></noscript>
+  <script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
