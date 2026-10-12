@@ -21,6 +21,16 @@ def test_display_pipeline_result_owns_cli_output(capsys):
     }
 
 
+def test_display_message_selects_standard_or_error_output(capsys):
+    """Helper output also stays behind IO Manager's output functions."""
+    io_manager.display_message("normal")
+    io_manager.display_message("problem", error=True, end="")
+
+    captured = capsys.readouterr()
+    assert captured.out == "normal\n"
+    assert captured.err == "problem"
+
+
 def test_validate_payload_removes_only_invalid_modules():
     """Valid modules continue while malformed module metadata becomes an error."""
     modules, errors = io_manager.validate_payload(

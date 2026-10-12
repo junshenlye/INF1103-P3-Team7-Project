@@ -14,6 +14,7 @@ import json
 import logging
 from pathlib import Path
 import shutil
+import sys
 import uuid
 from PIL import Image, UnidentifiedImageError
 
@@ -317,3 +318,9 @@ def display_pipeline_result(payload, errors):
             indent=2,
         )
     )
+
+
+def display_message(message, error=False, end="\n"):
+    """Write helper CLI text through the shared IO output boundary."""
+    stream = sys.stderr if error else sys.stdout
+    print(message, file=stream, end=end)
