@@ -15,6 +15,10 @@ if [ ! -f .env ]; then
     echo "Created .env from .env.example. Add DASHSCOPE_API_KEY before using AI features." >&2
 fi
 
+# Create the bind-mount parent as the current user. PostgreSQL creates and owns
+# its pgdata subdirectory, avoiding host-permission differences across machines.
+mkdir -p database/data
+
 stop_services() {
     exit_code=$?
     trap - EXIT INT TERM
