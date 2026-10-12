@@ -76,7 +76,7 @@ metadata, so one vague screenshot does not discard the rest of the result.
 - The permitted PostgreSQL persistence option stores complete JSON documents
   as JSONB while keeping database access behind Data Manager functions.
 - Docker Compose provides the same services locally and in the test workflow.
-- GitHub Actions runs function, frontend and isolated Docker workflow tests on
+- GitHub Actions builds and smoke-tests the complete Docker deployment on
   pushes and pull requests.
 
 ## Repository structure
@@ -190,7 +190,9 @@ recommended way to demonstrate the complete system.
 ## Run the tests
 
 All test code and fixtures are contained in `tests/`. Normal tests use fake AI
-responses and do not consume Qwen tokens.
+responses and do not consume Qwen tokens. The short
+[`tests/README.md`](tests/README.md) maps each suite to the user-visible outcome
+and historical bug it protects.
 
 Function tests:
 
@@ -208,6 +210,12 @@ Workflow tests with a disposable PostgreSQL container:
 
 ```sh
 ./tests/run.sh workflow
+```
+
+General deployment check used by GitHub Actions:
+
+```sh
+./tests/run.sh deployment
 ```
 
 Run every automated group:
