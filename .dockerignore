@@ -6,8 +6,8 @@
 **/__pycache__
 **/*.py[cod]
 .DS_Store
-frontend-demo
-test_case
 frontend
+tests/fixtures/live
+tests/frontend
 data
 .coverage
