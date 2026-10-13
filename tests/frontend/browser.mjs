@@ -48,6 +48,7 @@ await page.route('**/api/**', async route => {
       });
     }
     project.modules = structuredClone(fixture.project.modules);
+    project.schedule = structuredClone(fixture.schedule);
     project.recommendations = structuredClone(fixture.project.recommendations);
     return route.fulfill({
       json: {
@@ -60,8 +61,6 @@ await page.route('**/api/**', async route => {
         ],
       },
     });
-  } else if (path.endsWith('/schedule')) {
-    payload = fixture.schedule;
   } else if (path.endsWith('/recommendations') && req.method() === 'POST') {
     recommendationRequests++;
     return route.fulfill({

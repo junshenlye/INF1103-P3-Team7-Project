@@ -14,8 +14,8 @@ test('transport preserves partial-success payloads and errors', async () => {
 test('HTTP errors expose helper error messages', async () => {
   const original = global.fetch;
   try {
-    global.fetch = async () => Response.json({ payload: null, errors: ['No current modules.'] }, { status: 404 });
-    await assert.rejects(request('/api/projects/1/schedule'), /No current modules/);
+    global.fetch = async () => Response.json({ payload: null, errors: ['Project not found.'] }, { status: 404 });
+    await assert.rejects(request('/api/projects/1'), /Project not found/);
   } finally { global.fetch = original; }
 });
 test('uploads preserve multipart boundaries', async () => {

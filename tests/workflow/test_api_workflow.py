@@ -26,6 +26,34 @@ def test_project_api_returns_independent_json_contract(monkeypatch):
     }
 
 
+def test_project_detail_returns_saved_schedule_without_rebuilding(monkeypatch):
+    """Loading a project must not send saved modules through Logic Manager."""
+    saved_schedule = {"week_count": 14, "weeks": [], "unscheduled": []}
+    monkeypatch.setattr(
+        api_helper.data_manager,
+        "get_project_overview",
+        lambda project_id: {
+            "id": project_id,
+            "modules": [{"module_title": "INF1103"}],
+            "schedule": saved_schedule,
+            "pipeline_runs": [],
+            "recommendations": [],
+        },
+    )
+    monkeypatch.setattr(
+        api_helper.logic_manager,
+        "build_weekly_schedule",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("retrieval must not rebuild the schedule")
+        ),
+    )
+
+    response = api_helper.APP.test_client().get("/api/projects/1")
+
+    assert response.status_code == 200
+    assert response.get_json()["payload"]["schedule"] == saved_schedule
+
+
 def test_process_api_groups_multiple_images_into_one_module(monkeypatch):
     """The helper writes one manifest module with all uploaded evidence."""
     captured = {}
@@ -134,3 +162,4 @@ def test_unused_module_revision_routes_are_removed():
         "/api/projects/1/modules/INF1103",
         json={"module_title": "INF1103"},
     ).status_code == 404
+    assert client.get("/api/projects/1/schedule").status_code == 404

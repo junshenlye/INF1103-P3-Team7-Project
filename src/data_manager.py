@@ -7,7 +7,6 @@ managers continue to work with dictionaries and do not know how data is stored.
 from hashlib import sha256
 import json
 import os
-from pathlib import Path
 
 import psycopg
 from psycopg.rows import dict_row
@@ -162,13 +161,9 @@ def save_pipeline_result(
     run_id,
     payload,
     errors,
-    source_hashes=None,
-    prompt_version="unknown",
-    model_name="unknown",
     database_url=None,
 ):
-    """Atomically save module results and complete a pipeline run."""
-    source_hashes = source_hashes or {}
+    """Atomically save the complete result and finish a pipeline run."""
     modules = payload.get("modules", []) if isinstance(payload, dict) else []
     if payload is None:
         status = "failed"
@@ -180,39 +175,6 @@ def save_pipeline_result(
     try:
         with create_connection(database_url) as connection:
             with connection.cursor() as cursor:
-                for module in modules:
-                    module_title = module["module_title"]
-                    cursor.execute(
-                        """
-                        SELECT COALESCE(MAX(revision), 0) AS latest_revision
-                        FROM module_results
-                        WHERE project_id = %s AND module_title = %s
-                        """,
-                        (project_id, module_title),
-                    )
-                    revision_state = cursor.fetchone()
-                    revision = revision_state["latest_revision"] + 1
-                    cursor.execute(
-                        """
-                        INSERT INTO module_results (
-                            project_id, run_id, module_title, credit, source_hash,
-                            prompt_version, model_name, revision, module_payload
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            project_id,
-                            run_id,
-                            module_title,
-                            module["credit"],
-                            source_hashes.get(module_title),
-                            prompt_version,
-                            model_name,
-                            revision,
-                            Jsonb(module),
-                        ),
-                    )
-
                 cursor.execute(
                     """
                     UPDATE pipeline_runs
@@ -240,29 +202,29 @@ def save_pipeline_result(
                 )
     except DataManagerError:
         raise
-    except (KeyError, TypeError) as error:
-        raise DataManagerError("Pipeline result has an invalid structure.") from error
     except psycopg.Error as error:
         raise DataManagerError("Could not save the pipeline result.") from error
 
 
-def get_current_modules(project_id, database_url=None):
-    """Return the newest stored result for each module in one project."""
+def get_latest_pipeline_result(project_id, database_url=None):
+    """Return the newest complete saved payload without recomputing it."""
     try:
         with create_connection(database_url) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT DISTINCT ON (module_title) module_payload
-                    FROM module_results
-                    WHERE project_id = %s
-                    ORDER BY module_title, revision DESC, id DESC
+                    SELECT result_payload
+                    FROM pipeline_runs
+                    WHERE project_id = %s AND result_payload IS NOT NULL
+                    ORDER BY completed_at DESC NULLS LAST, id DESC
+                    LIMIT 1
                     """,
                     (project_id,),
                 )
-                return [row["module_payload"] for row in cursor.fetchall()]
+                row = cursor.fetchone()
+                return row["result_payload"] if row is not None else None
     except psycopg.Error as error:
-        raise DataManagerError("Could not load current modules.") from error
+        raise DataManagerError("Could not load the latest pipeline result.") from error
 
 
 def list_pipeline_runs(project_id, database_url=None):
@@ -401,28 +363,17 @@ def set_recommendation_status(
 
 
 def get_project_overview(project_id, database_url=None):
-    """Return frontend-ready stored project data without running AI."""
+    """Return frontend-ready saved data without rerunning pipeline logic."""
     project = get_project(project_id, database_url)
     if project is None:
         return None
-    project["modules"] = get_current_modules(project_id, database_url)
+    latest_result = get_latest_pipeline_result(project_id, database_url)
+    project["modules"] = (
+        latest_result.get("modules", []) if isinstance(latest_result, dict) else []
+    )
+    project["schedule"] = (
+        latest_result.get("schedule") if isinstance(latest_result, dict) else None
+    )
     project["pipeline_runs"] = list_pipeline_runs(project_id, database_url)
     project["recommendations"] = list_recommendations(project_id, database_url)
     return project
-
-
-def hash_file(file_path):
-    """Return the SHA-256 digest of one IO-validated source file."""
-    digest = sha256()
-    with Path(file_path).open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def hash_files(file_paths):
-    """Return one order-sensitive digest for a module's evidence images."""
-    digest = sha256()
-    for file_path in file_paths:
-        digest.update(hash_file(file_path).encode("ascii"))
-    return digest.hexdigest()

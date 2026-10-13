@@ -21,7 +21,7 @@ def database_url():
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                TRUNCATE recommendations, module_results, pipeline_runs, projects
+                TRUNCATE recommendations, pipeline_runs, projects
                 RESTART IDENTITY CASCADE
                 """
             )
@@ -30,7 +30,7 @@ def database_url():
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                TRUNCATE recommendations, module_results, pipeline_runs, projects
+                TRUNCATE recommendations, pipeline_runs, projects
                 RESTART IDENTITY CASCADE
                 """
             )

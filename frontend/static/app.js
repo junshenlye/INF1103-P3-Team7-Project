@@ -128,12 +128,10 @@ function syncUrl() {
 }
 async function refreshProject(id) {
   const project = (await request(`/api/projects/${id}`)).payload;
-  const schedule = project.modules?.length ? await request(`/api/projects/${id}/schedule`) : null;
   state.project = project;
   state.plan = newestPlan(project.recommendations);
-  state.schedule = schedule?.payload || null;
+  state.schedule = project.schedule || null;
   if (!modules()[state.moduleTab]) state.moduleTab = 0;
-  if (schedule?.errors?.length) state.warnings.push(...schedule.errors);
 }
 async function run(label, action, options = {}) {
   if (state.busy) return;

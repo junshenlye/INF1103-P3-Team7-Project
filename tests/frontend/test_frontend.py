@@ -49,8 +49,8 @@ def test_unavailable_api_is_explicit(client):
 
 def test_partial_and_error_responses_are_not_hidden(client):
     with patch('frontend.app.urlopen') as open_url:
-        body = b'{"payload":null,"errors":["No current modules"]}'
+        body = b'{"payload":null,"errors":["Project not found"]}'
         open_url.side_effect = HTTPError('http://helper/api', 404, 'Not found', {'Content-Type': 'application/json'}, io.BytesIO(body))
-        result = client.get('/api/projects/1/schedule')
+        result = client.get('/api/projects/1')
     assert result.status_code == 404
     assert result.data == body

@@ -30,8 +30,6 @@ def main(argv=None):
     project_id = None
     run_id = None
     study_plan = None
-    source_hashes = {}
-    model_name = f"{ai_manager.RELEVANCE_MODEL}+{ai_manager.REASONING_MODEL}"
     if data_manager.is_configured():
         try:
             configured_project_id = os.getenv("STACKPLAN_PROJECT_ID")
@@ -53,20 +51,8 @@ def main(argv=None):
 
     if payload is not None:
         current_stage = "AI Manager"
-        if project_id is not None:
-            try:
-                source_hashes = {
-                    module["module_title"]: data_manager.hash_files(
-                        module.get("stored_file_paths")
-                        or [module["stored_file_path"]]
-                    )
-                    for module in payload["modules"]
-                }
-            except (OSError, data_manager.DataManagerError) as error:
-                errors.append(data_manager.format_data_error(error))
-
-        # Every submitted module goes through Qwen. Stored results are retained
-        # for history only and never bypass the assignment's AI processing step.
+        # Every submitted module goes through Qwen. Saved results are used only
+        # when the frontend retrieves an already-completed pipeline run.
         payload, errors = asyncio.run(
             ai_manager.process_payload(payload, errors)
         )
@@ -110,9 +96,6 @@ def main(argv=None):
                 run_id,
                 payload,
                 errors,
-                source_hashes=source_hashes,
-                prompt_version=ai_manager.PROMPT_VERSION,
-                model_name=model_name,
             )
         except data_manager.DataManagerError as error:
             errors.append(data_manager.format_data_error(error))

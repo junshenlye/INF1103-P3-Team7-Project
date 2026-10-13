@@ -22,21 +22,6 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     completed_at TIMESTAMPTZ
 );
 
-CREATE TABLE IF NOT EXISTS module_results (
-    id BIGSERIAL PRIMARY KEY,
-    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    run_id BIGINT REFERENCES pipeline_runs(id) ON DELETE SET NULL,
-    module_title TEXT NOT NULL,
-    credit INTEGER NOT NULL CHECK (credit > 0),
-    source_hash TEXT,
-    prompt_version TEXT NOT NULL,
-    model_name TEXT NOT NULL,
-    revision INTEGER NOT NULL CHECK (revision > 0),
-    module_payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (project_id, module_title, revision)
-);
-
 CREATE TABLE IF NOT EXISTS recommendations (
     id BIGSERIAL PRIMARY KEY,
     project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

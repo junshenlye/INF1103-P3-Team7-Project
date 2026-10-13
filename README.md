@@ -23,7 +23,7 @@ dates and weights are never presented as confirmed facts.
   scheduling.
 - Keep Week 7 clear as recess unless source evidence explicitly schedules an
   assessment there.
-- Store projects, current module results, pipeline errors and recommendations in
+- Store projects, complete pipeline results, errors and recommendations in
   PostgreSQL.
 - Continue with usable modules when another module cannot be processed.
 - Run the complete application with Docker Compose.
@@ -49,7 +49,7 @@ The managers in `src/` have one responsibility each:
 - **AI Manager** owns Qwen prompts, HTTP requests and JSON response parsing.
 - **Logic Manager** normalizes AI output, expands repeated assessments, builds
   the weekly ranking, and validates study advice against the schedule.
-- **Data Manager** stores projects, current results and recommendations.
+- **Data Manager** stores projects, complete pipeline results and recommendations.
 
 `main.py` deliberately owns the sequence between these managers. PostgreSQL
 stores its files in the project at `database/data/`. Compose mounts that folder

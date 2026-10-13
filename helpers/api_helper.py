@@ -88,20 +88,6 @@ def project_detail(project_id):
     return jsonify({"payload": json_ready(project), "errors": []})
 
 
-@APP.get("/api/projects/<int:project_id>/schedule")
-def project_schedule(project_id):
-    """Build the deterministic schedule from the current stored modules."""
-    try:
-        modules = data_manager.get_current_modules(project_id)
-        if not modules:
-            return error_response("Project has no current modules.", 404)
-        errors = []
-        schedule = logic_manager.build_weekly_schedule(modules, errors)
-        return jsonify({"payload": schedule, "errors": errors})
-    except data_manager.DataManagerError as error:
-        return error_response(data_manager.format_data_error(error), 500)
-
-
 @APP.post("/api/projects/<int:project_id>/process")
 def process_project(project_id):
     """Stage uploaded module images and invoke the core CLI unchanged."""
@@ -186,19 +172,25 @@ def recommendations(project_id):
         body = request.get_json(silent=True) or {}
         recommendation_type = body.get("recommendation_type")
         preferences = body.get("preferences", {})
-        modules = data_manager.get_current_modules(project_id)
-        if not modules:
-            return error_response("Project has no current modules.", 404)
-        schedule_errors = []
+        latest_result = data_manager.get_latest_pipeline_result(project_id)
+        modules = (
+            latest_result.get("modules", [])
+            if isinstance(latest_result, dict)
+            else []
+        )
+        schedule = (
+            latest_result.get("schedule")
+            if isinstance(latest_result, dict)
+            else None
+        )
+        if not modules or not isinstance(schedule, dict):
+            return error_response("Project has no saved pipeline result.", 404)
         project_payload = {
             "module_count": len(modules),
             "modules": modules,
-            "schedule": logic_manager.build_weekly_schedule(
-                modules,
-                schedule_errors,
-            ),
+            "schedule": schedule,
         }
-        errors = list(schedule_errors)
+        errors = []
         normalized_preferences = logic_manager.normalize_study_preferences(
             preferences
         )

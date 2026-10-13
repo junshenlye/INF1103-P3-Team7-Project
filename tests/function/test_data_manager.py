@@ -1,4 +1,4 @@
-"""Function tests for PostgreSQL persistence and current-result selection."""
+"""Function tests for PostgreSQL persistence and saved-result selection."""
 
 from src import data_manager
 
@@ -37,43 +37,45 @@ def test_module_snapshot_hash_describes_the_recommendation_input():
     )
 
 
-def test_pipeline_rerun_returns_latest_module_result(database_url):
-    """A project read returns the newest stored result for each module."""
+def test_pipeline_rerun_returns_latest_complete_result(database_url):
+    """A project read returns the newest saved pipeline payload unchanged."""
     project = data_manager.create_project("Trimester 1", database_url=database_url)
     first_run = data_manager.start_pipeline_run(project["id"], 1, database_url)
     first = module_payload()
+    first_payload = {"module_count": 1, "modules": [first], "schedule": {"weeks": []}}
     data_manager.save_pipeline_result(
         project["id"],
         first_run,
-        {"module_count": 1, "modules": [first], "schedule": {}},
+        first_payload,
         [],
-        source_hashes={"INF1104": "hash-one"},
-        prompt_version="v1",
-        model_name="qwen",
         database_url=database_url,
     )
 
     second_run = data_manager.start_pipeline_run(project["id"], 1, database_url)
     second = module_payload("Quiz updated")
+    second_payload = {
+        "module_count": 1,
+        "modules": [second],
+        "schedule": {"weeks": [{"week": 1, "items": []}]},
+    }
     data_manager.save_pipeline_result(
         project["id"],
         second_run,
-        {"module_count": 1, "modules": [second], "schedule": {}},
+        second_payload,
         [],
-        source_hashes={"INF1104": "hash-two"},
-        prompt_version="v1",
-        model_name="qwen",
         database_url=database_url,
     )
 
-    assert data_manager.get_current_modules(project["id"], database_url) == [second]
-    assert "module_revisions" not in data_manager.get_project_overview(
+    assert data_manager.get_latest_pipeline_result(
         project["id"], database_url
-    )
+    ) == second_payload
+    overview = data_manager.get_project_overview(project["id"], database_url)
+    assert overview["modules"] == [second]
+    assert overview["schedule"] == second_payload["schedule"]
 
 
-def test_recommendation_is_saved_separately_from_module_facts(database_url):
-    """Study advice has its own record and never mutates current modules."""
+def test_recommendation_is_saved_separately_from_pipeline_result(database_url):
+    """Study advice has its own record and never mutates the saved result."""
     project = data_manager.create_project("Planning", database_url=database_url)
     module = module_payload()
     saved = data_manager.save_recommendation(
