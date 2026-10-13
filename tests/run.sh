@@ -203,9 +203,9 @@ run_live_cli_test() {
     heading "OPTIONAL LIVE AI TEST — One real module image"
     describe \
         "Processes the HSC1010 fixture through the real Qwen service. This requires DASHSCOPE_API_KEY in .env, consumes API credits, and is intentionally excluded from the automated all mode." \
-        "docker compose run --rm stackplan-cli /input/tests/fixtures/live/one-module.json"
+        "docker compose run --rm stackplan-cli /input/grader-test-case/one-module.json"
     docker compose run --rm stackplan-cli \
-        /input/tests/fixtures/live/one-module.json
+        /input/grader-test-case/one-module.json
     live_test_passed=true
     printf 'PASS — Optional live AI CLI test completed.\n'
 }
@@ -260,7 +260,7 @@ print_ui_instructions() {
         "" \
         "Open http://127.0.0.1:5173 and create a trimester." \
         "Add HSC1007, HSC1009, HSC1010, and OTY1103 as four modules." \
-        "Upload the matching JPEG files from tests/fixtures/live/images/." \
+        "Upload the matching JPEG files from grader-test-case/images/." \
         "Confirm that the Week 1–14 schedule, assessment details, and study plan appear, and that the saved trimester can be reopened." \
         "" \
         "Do not submit an API key in the project ZIP."

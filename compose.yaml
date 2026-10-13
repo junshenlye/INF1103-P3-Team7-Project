@@ -34,7 +34,7 @@ services:
     volumes:
       - .:/input:ro
     command:
-      - /input/tests/fixtures/live/one-module.json
+      - /input/grader-test-case/one-module.json
 
   api:
     image: stackplan

@@ -1,8 +1,7 @@
 # Test strategy
 
-For the complete teacher-facing procedure, Windows and macOS/Linux commands,
-timestamped logs, and the required manual UI run, see
-[`TEST_SCRIPT.md`](../TEST_SCRIPT.md).
+For the grader commands and manual UI run, see
+[`GRADER_TEST_GUIDE.md`](../GRADER_TEST_GUIDE.md).
 
 Stackplan tests observable outcomes, manager boundaries and previously found
 bugs. Normal automated tests never call the live Qwen API or consume tokens.

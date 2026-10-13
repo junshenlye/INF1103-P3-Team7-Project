@@ -89,7 +89,7 @@ database/            PostgreSQL schema and ignored persistent runtime data
 tests/function/      focused manager tests
 tests/workflow/      pipeline, API and database workflow tests
 tests/frontend/      frontend contract and browser checks
-tests/fixtures/      test data and optional live Qwen examples
+grader-test-case/    easy-to-find live JSON inputs and assessment images
 scripts/run_local_unix.sh macOS and Linux local launcher
 scripts/run_local_windows.ps1 Windows local launcher
 compose.windows.yaml Windows-safe PostgreSQL storage override
@@ -183,7 +183,7 @@ The supplied four-module example can be run with:
 
 ```sh
 docker compose run --rm stackplan-cli \
-  /input/tests/fixtures/live/all-modules.json
+  /input/grader-test-case/all-modules.json
 ```
 
 To process a payload stored elsewhere, the adapter copies its referenced
@@ -208,7 +208,7 @@ python -m pip install -r requirements-dev.txt
 Run the manager pipeline directly:
 
 ```sh
-python -m src.main tests/fixtures/live/one-module.json
+python -m src.main grader-test-case/one-module.json
 ```
 
 Direct execution reads `.env`. Without `DATABASE_URL`, the pipeline still
@@ -218,56 +218,24 @@ recommended way to demonstrate the complete system.
 ## Run the tests
 
 All test code and fixtures are contained in `tests/`. Normal tests use fake AI
-responses and do not consume Qwen tokens. The short
-[`tests/README.md`](tests/README.md) maps each suite to the user-visible outcome
-and historical bug it protects. The teacher-facing [`TEST_SCRIPT.md`](TEST_SCRIPT.md)
-provides Windows and macOS/Linux commands, expected results, timestamped logs,
-and the required actual run through the UI.
+responses and do not consume Qwen tokens. See the
+[`GRADER_TEST_GUIDE.md`](GRADER_TEST_GUIDE.md) for the complete Windows,
+macOS, Linux, and manual UI instructions.
 
-Function tests:
-
-```sh
-sh ./tests/run.sh function
-```
-
-Frontend contract and JavaScript tests:
-
-```sh
-sh ./tests/run.sh frontend
-```
-
-Workflow tests with a disposable PostgreSQL container:
-
-```sh
-sh ./tests/run.sh workflow
-```
-
-General deployment check used by GitHub Actions:
-
-```sh
-sh ./tests/run.sh deployment
-```
-
-Run every automated group:
+Run every automated test on macOS or Linux:
 
 ```sh
 sh ./tests/run.sh
 ```
 
-On Windows PowerShell:
+Run every automated test on Windows PowerShell:
 
 ```powershell
 .\tests\run.ps1
 ```
 
-The workflow database uses temporary container storage and is removed after
-the run. The development database and its saved projects are not changed.
-
-The optional end-to-end browser check requires Playwright and a running app:
-
-```sh
-node tests/frontend/browser.mjs
-```
+The runner prints a final verification summary and saves the full output in
+`test-results/`.
 
 ## Inspect or export saved data
 
