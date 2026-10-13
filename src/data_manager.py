@@ -417,8 +417,8 @@ def save_confirmed_module_edit(project_id, module, database_url=None):
         raise DataManagerError("Could not save the edited module.") from error
 
 
-def calculate_revision_hash(modules):
-    """Return a deterministic module hash for recommendation audit records."""
+def calculate_module_snapshot_hash(modules):
+    """Return a deterministic module snapshot hash for recommendation audits."""
     canonical = json.dumps(modules, sort_keys=True, separators=(",", ":"))
     return sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -450,7 +450,7 @@ def save_recommendation(
                     (
                         project_id,
                         recommendation_type,
-                        calculate_revision_hash(modules),
+                        calculate_module_snapshot_hash(modules),
                         prompt_version,
                         model_name,
                         Jsonb(preferences),

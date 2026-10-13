@@ -22,6 +22,21 @@ def module_payload(name="Quiz 1"):
     }
 
 
+def test_module_snapshot_hash_describes_the_recommendation_input():
+    """Equivalent module snapshots have the same audit fingerprint."""
+    module = module_payload()
+    reordered_module = dict(reversed(list(module.items())))
+
+    snapshot_hash = data_manager.calculate_module_snapshot_hash([module])
+
+    assert snapshot_hash == data_manager.calculate_module_snapshot_hash(
+        [reordered_module]
+    )
+    assert snapshot_hash != data_manager.calculate_module_snapshot_hash(
+        [module_payload("Quiz updated")]
+    )
+
+
 def test_pipeline_rerun_activates_latest_revision(database_url):
     """A demo rerun displays its latest result while preserving history."""
     project = data_manager.create_project("Trimester 1", database_url=database_url)
