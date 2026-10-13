@@ -13,11 +13,8 @@ import argparse
 import json
 import logging
 from pathlib import Path
-<<<<<<< HEAD
-=======
 import shutil
 import sys
->>>>>>> 8ceb9150284b2cfcc92d8c2f86d8919b03ddf41f
 import uuid
 from PIL import Image, UnidentifiedImageError
 
