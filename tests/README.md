@@ -1,16 +1,23 @@
 # Test strategy
 
+For the complete teacher-facing procedure, Windows and macOS/Linux commands,
+timestamped logs, and the required manual UI run, see
+[`TEST_SCRIPT.md`](../TEST_SCRIPT.md).
+
 Stackplan tests observable outcomes, manager boundaries and previously found
 bugs. Normal automated tests never call the live Qwen API or consume tokens.
 
 ## Test groups
 
-| Group | Question it answers | Command |
-| --- | --- | --- |
-| Manager outcomes | Do intake, AI parsing, scheduling and recommendation rules make the correct decision? | `./tests/run.sh function` |
-| Frontend contracts | Does the UI preserve uploads, partial errors, unknown dates and backend response meaning? | `./tests/run.sh frontend` |
-| Docker workflow | Do the API, complete pipeline and PostgreSQL persistence work together in containers? | `./tests/run.sh workflow` |
-| Deployment smoke | Can a clean machine build the real stack, reach both services and complete a database-backed request through the frontend? | `./tests/run.sh deployment` |
+| Group | Question it answers | macOS/Linux command | Windows command |
+| --- | --- | --- | --- |
+| Manager outcomes | Do intake, AI parsing, scheduling and recommendation rules make the correct decision? | `sh ./tests/run.sh function` | `.\tests\run.ps1 -Group function` |
+| Frontend contracts | Does the UI preserve uploads, partial errors, unknown dates and backend response meaning? | `sh ./tests/run.sh frontend` | `.\tests\run.ps1 -Group frontend` |
+| Docker workflow | Do the API, complete pipeline and PostgreSQL persistence work together in containers? | `sh ./tests/run.sh workflow` | `.\tests\run.ps1 -Group workflow` |
+| Deployment smoke | Can a clean machine build the real stack, reach both services and complete a database-backed request through the frontend? | `sh ./tests/run.sh deployment` | `.\tests\run.ps1 -Group deployment` |
+
+Running either script without a group runs all four automated groups and saves
+the complete output in `test-results/`.
 
 The Docker workflow uses an isolated temporary database. It cannot modify the
 development data stored in `database/data/`.

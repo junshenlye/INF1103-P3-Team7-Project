@@ -176,7 +176,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_local_wind
 The small live example processes one module and consumes Qwen tokens:
 
 ```sh
-./tests/run.sh live
+sh ./tests/run.sh live
 ```
 
 The supplied four-module example can be run with:
@@ -220,36 +220,44 @@ recommended way to demonstrate the complete system.
 All test code and fixtures are contained in `tests/`. Normal tests use fake AI
 responses and do not consume Qwen tokens. The short
 [`tests/README.md`](tests/README.md) maps each suite to the user-visible outcome
-and historical bug it protects.
+and historical bug it protects. The teacher-facing [`TEST_SCRIPT.md`](TEST_SCRIPT.md)
+provides Windows and macOS/Linux commands, expected results, timestamped logs,
+and the required actual run through the UI.
 
 Function tests:
 
 ```sh
-./tests/run.sh function
+sh ./tests/run.sh function
 ```
 
 Frontend contract and JavaScript tests:
 
 ```sh
-./tests/run.sh frontend
+sh ./tests/run.sh frontend
 ```
 
 Workflow tests with a disposable PostgreSQL container:
 
 ```sh
-./tests/run.sh workflow
+sh ./tests/run.sh workflow
 ```
 
 General deployment check used by GitHub Actions:
 
 ```sh
-./tests/run.sh deployment
+sh ./tests/run.sh deployment
 ```
 
 Run every automated group:
 
 ```sh
-./tests/run.sh all
+sh ./tests/run.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+.\tests\run.ps1
 ```
 
 The workflow database uses temporary container storage and is removed after
