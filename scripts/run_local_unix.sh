@@ -1,12 +1,32 @@
 #!/usr/bin/env sh
 
-# Start PostgreSQL, the helper API and the frontend together with Compose.
+# Start PostgreSQL, the helper API and the frontend on macOS or Linux.
 set -eu
+
+operating_system="$(uname -s)"
+case "$operating_system" in
+    Darwin|Linux)
+        ;;
+    *)
+        echo "This launcher is for macOS and Linux. Use the Windows PowerShell launcher on Windows." >&2
+        exit 1
+        ;;
+esac
 
 cd "$(dirname "$0")/.."
 
 if ! command -v docker >/dev/null 2>&1; then
-    echo "Docker is required to start Stackplan." >&2
+    echo "Docker with Docker Compose is required to start Stackplan." >&2
+    exit 1
+fi
+
+if ! docker compose version >/dev/null 2>&1; then
+    echo "Docker Compose 2.24 or newer is required to start Stackplan." >&2
+    exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    echo "Docker is not running. Start it and try again." >&2
     exit 1
 fi
 

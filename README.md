@@ -90,23 +90,33 @@ tests/function/      focused manager tests
 tests/workflow/      pipeline, API and database workflow tests
 tests/frontend/      frontend contract and browser checks
 tests/fixtures/      test data and optional live Qwen examples
-scripts/run_local.sh complete local launcher
+scripts/run_local_unix.sh macOS and Linux local launcher
+scripts/run_local_windows.ps1 Windows local launcher
+compose.windows.yaml Windows-safe PostgreSQL storage override
 compose.yaml         application and isolated test services
 ```
 
 ## Requirements
 
-- Docker with Docker Compose
+- Docker with Docker Compose 2.24 or newer
+- PowerShell 5.1 or newer on Windows, with Docker Desktop using Linux containers
 - A DashScope API key
 - Python 3.12 for development outside Docker
 - Node.js only for the optional frontend JavaScript checks
 
 ## Configure the environment
 
-Create the local environment file:
+Create the local environment file on macOS or Linux (the launcher also does
+this automatically when the file is missing):
 
 ```sh
 cp .env.example .env
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
 ```
 
 Open `.env` and set:
@@ -121,26 +131,44 @@ placed in a command or copied into an image.
 
 ## Run the complete project
 
-Start the frontend, API and PostgreSQL database:
+Start the frontend, API and PostgreSQL database on macOS or Linux:
 
 ```sh
-./scripts/run_local.sh
+./scripts/run_local_unix.sh
 ```
 
+On Windows, open PowerShell in the repository and run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_local_windows.ps1
+```
+
+The execution-policy override applies only to that PowerShell process; it does
+not change the machine or user policy.
+
 Open <http://127.0.0.1:5173>. Incoming browser and API requests are shown in
-the terminal. Press `Ctrl+C` to stop the services; `database/data/` is kept.
+the terminal. Press `Ctrl+C` to stop the services; saved database data is kept.
 The API and frontend do not poll one another. Their `/health` endpoints remain
 available for an explicit diagnostic check without filling the logs.
 
-On the first run, the launcher creates `database/data/` and PostgreSQL applies
-`database/schema.sql`. Later runs detect the existing PostgreSQL files and reuse
-the saved projects instead of initializing the database again. Do not remove
-`database/data/` when saved project data needs to be retained.
+On the first run, either launcher creates `.env` from `.env.example` when it is
+missing, and PostgreSQL applies `database/schema.sql`. On macOS and Linux,
+PostgreSQL files are kept in `database/data/`. Windows uses a Docker-managed
+named volume because PostgreSQL data directories require Unix ownership and
+permissions that Windows host folders do not reliably provide. Both storage
+options survive container replacement.
 
 To use a different frontend port:
 
 ```sh
-FRONTEND_PORT=5174 ./scripts/run_local.sh
+FRONTEND_PORT=5174 ./scripts/run_local_unix.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:FRONTEND_PORT = "5174"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_local_windows.ps1
 ```
 
 ## Run the pipeline from the command line

@@ -1,0 +1,9 @@
+services:
+  database:
+    # PostgreSQL cannot reliably apply its required Unix ownership and
+    # permissions to a directory shared from the Windows filesystem.
+    volumes:
+      - stackplan-windows-database:/var/lib/postgresql/data
+
+volumes:
+  stackplan-windows-database:
