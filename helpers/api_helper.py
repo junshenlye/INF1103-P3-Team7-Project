@@ -46,7 +46,7 @@ def add_frontend_headers(response):
         "http://localhost:5173",
     )
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     return response
 
 
@@ -90,11 +90,11 @@ def project_detail(project_id):
 
 @APP.get("/api/projects/<int:project_id>/schedule")
 def project_schedule(project_id):
-    """Build the deterministic schedule from confirmed stored modules."""
+    """Build the deterministic schedule from the current stored modules."""
     try:
-        modules = data_manager.get_confirmed_modules(project_id)
+        modules = data_manager.get_current_modules(project_id)
         if not modules:
-            return error_response("Project has no confirmed modules.", 404)
+            return error_response("Project has no current modules.", 404)
         errors = []
         schedule = logic_manager.build_weekly_schedule(modules, errors)
         return jsonify({"payload": schedule, "errors": errors})
@@ -175,41 +175,6 @@ def process_project(project_id):
     return jsonify(result), status_code
 
 
-@APP.post(
-    "/api/projects/<int:project_id>/modules/<path:module_title>/confirm"
-)
-def confirm_module(project_id, module_title):
-    """Activate one stored AI revision selected by the student."""
-    body = request.get_json(silent=True) or {}
-    revision = body.get("revision")
-    if type(revision) is not int:
-        return error_response("revision must be an integer.", 400)
-    try:
-        data_manager.confirm_module_revision(project_id, module_title, revision)
-        return jsonify({"payload": {"confirmed": True}, "errors": []})
-    except data_manager.DataManagerError as error:
-        return error_response(data_manager.format_data_error(error), 400)
-
-
-@APP.put("/api/projects/<int:project_id>/modules/<path:module_title>")
-def edit_module(project_id, module_title):
-    """Validate and save a confirmed student-edited module revision."""
-    module = request.get_json(silent=True)
-    if not isinstance(module, dict) or module.get("module_title") != module_title:
-        return error_response("Edited module title does not match the URL.", 400)
-    validation_errors = []
-    try:
-        logic_manager.build_weekly_schedule([module], validation_errors)
-        if validation_errors:
-            return jsonify({"payload": None, "errors": validation_errors}), 400
-        saved = data_manager.save_confirmed_module_edit(project_id, module)
-        return jsonify({"payload": json_ready(saved), "errors": []})
-    except (KeyError, TypeError, ValueError) as error:
-        return error_response(f"Edited module is invalid: {error}", 400)
-    except data_manager.DataManagerError as error:
-        return error_response(data_manager.format_data_error(error), 400)
-
-
 @APP.route("/api/projects/<int:project_id>/recommendations", methods=["GET", "POST"])
 def recommendations(project_id):
     """List stored recommendations or generate one validated candidate."""
@@ -221,9 +186,9 @@ def recommendations(project_id):
         body = request.get_json(silent=True) or {}
         recommendation_type = body.get("recommendation_type")
         preferences = body.get("preferences", {})
-        modules = data_manager.get_confirmed_modules(project_id)
+        modules = data_manager.get_current_modules(project_id)
         if not modules:
-            return error_response("Project has no confirmed modules.", 404)
+            return error_response("Project has no current modules.", 404)
         schedule_errors = []
         project_payload = {
             "module_count": len(modules),

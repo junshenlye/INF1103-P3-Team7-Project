@@ -970,7 +970,7 @@ td strong {
   border-color:#bfd1bf;
   color:#3d613e
 }
-.review-list,.revision-list,.tasks {
+.review-list,.tasks {
   list-style:none;
   padding:0;
   margin:18px 0
@@ -986,18 +986,6 @@ td strong {
 .review-list p {
   font-size:13px;
   margin:5px 0 0
-}
-.revision-list {
-  font-size:13px
-}
-.revision-list li {
-  border-bottom:1px solid var(--line);
-  padding:12px 0
-}
-.revision-list span {
-  display:block;
-  color:var(--muted);
-  font-size:12px
 }
 .review-candidate .two-col>div {
   background:#e8ecdf;

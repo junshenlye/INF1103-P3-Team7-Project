@@ -29,7 +29,7 @@ These tests came from concrete failures or high-risk requirements:
 | Work appeared during Week 7 recess | Recurring or ranged work skips recess unless the source explicitly states Week 7. |
 | An assessment with no date became Week 1 advice | Unknown dates stay outside numbered schedule and study-plan weeks. |
 | One failed image discarded usable modules | Hard errors are retained while valid modules and soft comments continue. |
-| A rerun silently overwrote stored results | PostgreSQL activates the newest revision while retaining earlier revisions. |
+| A rerun displayed stale module data | PostgreSQL returns the newest stored result for each module. |
 | The frontend hid partial API failures | Usable payloads and their warnings are displayed together. |
 
 ## Adding a test

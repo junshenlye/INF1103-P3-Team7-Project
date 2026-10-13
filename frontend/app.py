@@ -20,7 +20,7 @@ def create_app():
     def index():
         return render_template("index.html")
 
-    @app.route("/api/<path:resource>", methods=["GET", "POST", "PUT"])
+    @app.route("/api/<path:resource>", methods=["GET", "POST"])
     @app.get("/health")
     def proxy(resource=None):
         path = quote(request.path, safe="/")
@@ -28,7 +28,7 @@ def create_app():
             path += "?" + request.query_string.decode("ascii")
         upstream_request = Request(
             app.config["API_URL"] + path,
-            data=request.get_data() if request.method in {"POST", "PUT"} else None,
+            data=request.get_data() if request.method == "POST" else None,
             headers={"Content-Type": request.content_type} if request.content_type else {},
             method=request.method,
         )

@@ -167,11 +167,7 @@ def save_pipeline_result(
     model_name="unknown",
     database_url=None,
 ):
-    """Atomically save module revisions and complete a pipeline run.
-
-    The newest successful revision becomes active automatically. Older
-    revisions remain stored for audit history but are no longer displayed.
-    """
+    """Atomically save module results and complete a pipeline run."""
     source_hashes = source_hashes or {}
     modules = payload.get("modules", []) if isinstance(payload, dict) else []
     if payload is None:
@@ -198,20 +194,11 @@ def save_pipeline_result(
                     revision = revision_state["latest_revision"] + 1
                     cursor.execute(
                         """
-                        UPDATE module_results SET is_confirmed = FALSE
-                        WHERE project_id = %s AND module_title = %s
-                          AND is_confirmed
-                        """,
-                        (project_id, module_title),
-                    )
-                    cursor.execute(
-                        """
                         INSERT INTO module_results (
                             project_id, run_id, module_title, credit, source_hash,
-                            prompt_version, model_name, revision, is_confirmed,
-                            module_payload
+                            prompt_version, model_name, revision, module_payload
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             project_id,
@@ -222,7 +209,6 @@ def save_pipeline_result(
                             prompt_version,
                             model_name,
                             revision,
-                            True,
                             Jsonb(module),
                         ),
                     )
@@ -260,44 +246,23 @@ def save_pipeline_result(
         raise DataManagerError("Could not save the pipeline result.") from error
 
 
-def get_confirmed_modules(project_id, database_url=None):
-    """Return the active confirmed module payloads for one project."""
+def get_current_modules(project_id, database_url=None):
+    """Return the newest stored result for each module in one project."""
     try:
         with create_connection(database_url) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT module_payload
+                    SELECT DISTINCT ON (module_title) module_payload
                     FROM module_results
-                    WHERE project_id = %s AND is_confirmed
-                    ORDER BY module_title
+                    WHERE project_id = %s
+                    ORDER BY module_title, revision DESC, id DESC
                     """,
                     (project_id,),
                 )
                 return [row["module_payload"] for row in cursor.fetchall()]
     except psycopg.Error as error:
-        raise DataManagerError("Could not load confirmed modules.") from error
-
-
-def list_module_revisions(project_id, database_url=None):
-    """Return all stored module revisions for review, newest first."""
-    try:
-        with create_connection(database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT id, module_title, credit, source_hash, prompt_version,
-                           model_name, revision, is_confirmed, module_payload,
-                           created_at
-                    FROM module_results
-                    WHERE project_id = %s
-                    ORDER BY module_title, revision DESC
-                    """,
-                    (project_id,),
-                )
-                return cursor.fetchall()
-    except psycopg.Error as error:
-        raise DataManagerError("Could not list module revisions.") from error
+        raise DataManagerError("Could not load current modules.") from error
 
 
 def list_pipeline_runs(project_id, database_url=None):
@@ -316,105 +281,6 @@ def list_pipeline_runs(project_id, database_url=None):
                 return cursor.fetchall()
     except psycopg.Error as error:
         raise DataManagerError("Could not list pipeline runs.") from error
-
-
-def confirm_module_revision(project_id, module_title, revision, database_url=None):
-    """Make one candidate revision active without deleting its history."""
-    try:
-        with create_connection(database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT id FROM module_results
-                    WHERE project_id = %s AND module_title = %s AND revision = %s
-                    """,
-                    (project_id, module_title, revision),
-                )
-                selected = cursor.fetchone()
-                if selected is None:
-                    raise DataManagerError("Module revision does not exist.")
-                cursor.execute(
-                    """
-                    UPDATE module_results SET is_confirmed = FALSE
-                    WHERE project_id = %s AND module_title = %s AND is_confirmed
-                    """,
-                    (project_id, module_title),
-                )
-                cursor.execute(
-                    "UPDATE module_results SET is_confirmed = TRUE WHERE id = %s",
-                    (selected["id"],),
-                )
-                cursor.execute(
-                    "UPDATE projects SET updated_at = NOW() WHERE id = %s",
-                    (project_id,),
-                )
-                return True
-    except DataManagerError:
-        raise
-    except psycopg.Error as error:
-        raise DataManagerError("Could not confirm the module revision.") from error
-
-
-def save_confirmed_module_edit(project_id, module, database_url=None):
-    """Create a confirmed student-edited revision without deleting AI history."""
-    if not isinstance(module, dict):
-        raise DataManagerError("Edited module must be a dictionary.")
-    module_title = module.get("module_title")
-    credit = module.get("credit")
-    if not isinstance(module_title, str) or type(credit) is not int or credit <= 0:
-        raise DataManagerError("Edited module metadata is invalid.")
-
-    try:
-        with create_connection(database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT COALESCE(MAX(revision), 0) AS latest_revision,
-                           (ARRAY_AGG(source_hash ORDER BY revision DESC))[1] AS source_hash
-                    FROM module_results
-                    WHERE project_id = %s AND module_title = %s
-                    """,
-                    (project_id, module_title),
-                )
-                state = cursor.fetchone()
-                if state["latest_revision"] == 0:
-                    raise DataManagerError("Module does not exist in this project.")
-                cursor.execute(
-                    """
-                    UPDATE module_results SET is_confirmed = FALSE
-                    WHERE project_id = %s AND module_title = %s AND is_confirmed
-                    """,
-                    (project_id, module_title),
-                )
-                cursor.execute(
-                    """
-                    INSERT INTO module_results (
-                        project_id, module_title, credit, source_hash,
-                        prompt_version, model_name, revision, is_confirmed,
-                        module_payload
-                    )
-                    VALUES (%s, %s, %s, %s, 'manual', 'student-edit', %s, TRUE, %s)
-                    RETURNING *
-                    """,
-                    (
-                        project_id,
-                        module_title,
-                        credit,
-                        state["source_hash"],
-                        state["latest_revision"] + 1,
-                        Jsonb(module),
-                    ),
-                )
-                saved = cursor.fetchone()
-                cursor.execute(
-                    "UPDATE projects SET updated_at = NOW() WHERE id = %s",
-                    (project_id,),
-                )
-                return saved
-    except DataManagerError:
-        raise
-    except psycopg.Error as error:
-        raise DataManagerError("Could not save the edited module.") from error
 
 
 def calculate_module_snapshot_hash(modules):
@@ -539,8 +405,7 @@ def get_project_overview(project_id, database_url=None):
     project = get_project(project_id, database_url)
     if project is None:
         return None
-    project["modules"] = get_confirmed_modules(project_id, database_url)
-    project["module_revisions"] = list_module_revisions(project_id, database_url)
+    project["modules"] = get_current_modules(project_id, database_url)
     project["pipeline_runs"] = list_pipeline_runs(project_id, database_url)
     project["recommendations"] = list_recommendations(project_id, database_url)
     return project

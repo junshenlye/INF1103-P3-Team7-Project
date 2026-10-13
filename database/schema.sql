@@ -32,15 +32,10 @@ CREATE TABLE IF NOT EXISTS module_results (
     prompt_version TEXT NOT NULL,
     model_name TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision > 0),
-    is_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
     module_payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (project_id, module_title, revision)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS one_confirmed_module_revision
-    ON module_results(project_id, module_title)
-    WHERE is_confirmed;
 
 CREATE TABLE IF NOT EXISTS recommendations (
     id BIGSERIAL PRIMARY KEY,

@@ -120,3 +120,17 @@ def test_process_api_keeps_each_upload_with_its_module(monkeypatch):
         ("INF1102", b"INF1102 evidence"),
         ("INF1103", b"INF1103 evidence"),
     ]
+
+
+def test_unused_module_revision_routes_are_removed():
+    """The API no longer exposes confirmation or manual revision editing."""
+    client = api_helper.APP.test_client()
+
+    assert client.post(
+        "/api/projects/1/modules/INF1103/confirm",
+        json={"revision": 1},
+    ).status_code == 404
+    assert client.put(
+        "/api/projects/1/modules/INF1103",
+        json={"module_title": "INF1103"},
+    ).status_code == 404

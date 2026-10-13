@@ -14,17 +14,15 @@ test('transport preserves partial-success payloads and errors', async () => {
 test('HTTP errors expose helper error messages', async () => {
   const original = global.fetch;
   try {
-    global.fetch = async () => Response.json({ payload: null, errors: ['No confirmed modules.'] }, { status: 404 });
-    await assert.rejects(request('/api/projects/1/schedule'), /No confirmed modules/);
+    global.fetch = async () => Response.json({ payload: null, errors: ['No current modules.'] }, { status: 404 });
+    await assert.rejects(request('/api/projects/1/schedule'), /No current modules/);
   } finally { global.fetch = original; }
 });
-test('manual revisions use JSON PUT and uploads preserve multipart boundaries', async () => {
+test('uploads preserve multipart boundaries', async () => {
   const original = global.fetch;
   try {
     let sent;
     global.fetch = async (_, options) => { sent = options; return Response.json({ payload: {}, errors: [] }); };
-    await request('/api/projects/1/modules/A', { method: 'PUT', body: { module_title: 'A' } });
-    assert.equal(sent.method, 'PUT'); assert.equal(sent.headers['Content-Type'], 'application/json');
     const upload = new FormData(); upload.append('modules', '[]');
     await request('/api/projects/1/process', { method: 'POST', body: upload });
     assert.equal(sent.body, upload); assert.equal(sent.headers, undefined);

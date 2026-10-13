@@ -1,6 +1,5 @@
 """Presentation and transport checks; never connect to PostgreSQL or live AI."""
 import io
-import json
 from unittest.mock import patch, MagicMock
 from urllib.error import HTTPError, URLError
 
@@ -24,20 +23,6 @@ def test_jinja_shell_and_static_assets(client):
         assert asset.status_code == 200
     assert client.get('/app.py').status_code == 404
     assert client.get('/tests/frontend/fixture.json').status_code == 404
-
-
-def test_put_preserves_unicode_module_title_and_body(client):
-    with patch('frontend.app.urlopen') as open_url:
-        response = MagicMock(status=200, headers={'Content-Type': 'application/json'})
-        response.read.return_value = b'{"payload":{},"errors":[]}'
-        open_url.return_value.__enter__.return_value = response
-        body = {'module_title': 'Module · A'}
-        result = client.put('/api/projects/1/modules/Module%20%C2%B7%20A', json=body)
-        assert result.status_code == 200
-        upstream = open_url.call_args.args[0]
-        assert upstream.method == 'PUT'
-        assert upstream.full_url.endswith('/Module%20%C2%B7%20A')
-        assert json.loads(upstream.data) == body
 
 
 def test_multipart_passes_file_and_boundary(client):
@@ -64,7 +49,7 @@ def test_unavailable_api_is_explicit(client):
 
 def test_partial_and_error_responses_are_not_hidden(client):
     with patch('frontend.app.urlopen') as open_url:
-        body = b'{"payload":null,"errors":["No confirmed modules"]}'
+        body = b'{"payload":null,"errors":["No current modules"]}'
         open_url.side_effect = HTTPError('http://helper/api', 404, 'Not found', {'Content-Type': 'application/json'}, io.BytesIO(body))
         result = client.get('/api/projects/1/schedule')
     assert result.status_code == 404

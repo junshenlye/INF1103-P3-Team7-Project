@@ -221,7 +221,7 @@ def test_pipeline_persists_successful_result(monkeypatch, tmp_path, database_url
     assert payload["study_plan"] == expected_recommendation
     assert errors == []
     assert len(projects) == 1
-    assert main.data_manager.get_confirmed_modules(
+    assert main.data_manager.get_current_modules(
         projects[0]["id"], database_url
     ) == [module]
     stored_recommendations = main.data_manager.list_recommendations(
