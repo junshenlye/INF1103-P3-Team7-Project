@@ -19,6 +19,9 @@ services:
       - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
 
   stackplan-cli:
+    # This is an opt-in, one-off service. Running `docker compose up` should
+    # start the web application without processing a sample payload.
+    profiles: ["cli"]
     build:
       context: .
       target: runtime
@@ -33,8 +36,6 @@ services:
         condition: service_healthy
     volumes:
       - .:/input:ro
-    command:
-      - /input/grader-test-case/one-module.json
 
   api:
     image: stackplan

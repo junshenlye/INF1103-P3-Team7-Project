@@ -152,7 +152,34 @@ placed in a command or copied into an image.
 
 ## Run the complete project
 
-Start the frontend, API and PostgreSQL database on macOS or Linux:
+### Teacher quick start with Docker Compose
+
+After creating `.env` and adding `DASHSCOPE_API_KEY`, start the complete web
+application on macOS or Linux with:
+
+```sh
+docker compose up --build
+```
+
+On Windows PowerShell, include the Windows storage override:
+
+```powershell
+docker compose --file compose.yaml --file compose.windows.yaml up --build
+```
+
+Compose builds and starts the frontend, API and PostgreSQL database. Open
+<http://127.0.0.1:5173> when the services are ready. The command does not run a
+sample pipeline automatically; processing starts only when a user submits
+modules through the browser or explicitly runs the CLI service. Press `Ctrl+C`
+to stop the services. Saved database data is kept.
+
+After the images have been built once, `docker compose up` is sufficient unless
+the source code or dependencies have changed.
+
+### Convenience launchers
+
+The launchers perform Docker checks, create `.env` when it is missing, wait for
+the services to become ready, and show the application logs. On macOS or Linux:
 
 ```sh
 ./scripts/run_local_unix.sh
@@ -167,10 +194,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_local_wind
 The execution-policy override applies only to that PowerShell process; it does
 not change the machine or user policy.
 
-Open <http://127.0.0.1:5173>. Incoming browser and API requests are shown in
-the terminal. Press `Ctrl+C` to stop the services; saved database data is kept.
-The API and frontend do not poll one another. Their `/health` endpoints remain
-available for an explicit diagnostic check without filling the logs.
+Incoming browser and API requests are shown in the terminal. The API and
+frontend do not poll one another. Their `/health` endpoints remain available
+for an explicit diagnostic check without filling the logs.
 
 On the first run, either launcher creates `.env` from `.env.example` when it is
 missing, and PostgreSQL applies `database/schema.sql`. On macOS and Linux,
@@ -193,6 +219,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_local_wind
 ```
 
 ## Run the pipeline from the command line
+
+The `stackplan-cli` service is intentionally excluded from `docker compose up`
+and has no default input. It runs only when explicitly given a payload.
 
 The small live example processes one module and consumes Qwen tokens:
 
