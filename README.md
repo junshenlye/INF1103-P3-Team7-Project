@@ -12,6 +12,21 @@ not simply displaying those screenshots: Stackplan uses AI to interpret vague
 or inconsistent assessment wording, then applies local rules so uncertain
 dates and weights are never presented as confirmed facts.
 
+## Project preview
+
+<p align="center">
+  <img src="docs/images/assessment-timetable.png" alt="Stackplan assessment timetable showing four modules across Weeks 1 to 14" width="100%">
+</p>
+
+<p align="center"><em>A single Week 1–14 view makes assessment timing and workload clusters easy to spot.</em></p>
+
+<p align="center">
+  <img src="docs/images/study-plan-overview.png" alt="Stackplan study-plan overview with suggestions and workload totals" width="49%">
+  <img src="docs/images/study-plan-weekly-actions.png" alt="Stackplan weekly study-plan actions grouped by week" width="49%">
+</p>
+
+<p align="center"><em>Validated assessments are turned into focused, week-by-week study actions.</em></p>
+
 ## Features
 
 - Upload one or more assessment screenshots for each module.
@@ -29,6 +44,12 @@ dates and weights are never presented as confirmed facts.
 - Run the complete application with Docker Compose.
 
 ## How it works
+
+<p align="center">
+  <img src="docs/images/system-architecture.png" alt="Stackplan system architecture showing the frontend, API helper, manager pipeline, Qwen provider and PostgreSQL database" width="100%">
+</p>
+
+<p align="center"><em>Stackplan keeps AI interpretation, scheduling rules, persistence and presentation in separate components.</em></p>
 
 ```text
 Browser
