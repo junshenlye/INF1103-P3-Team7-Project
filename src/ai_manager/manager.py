@@ -9,6 +9,7 @@ from .qwen_client import (
     RELEVANCE_MODEL,
     REASONING_MODEL,
     MAX_CONCURRENT_REQUESTS,
+    AIConfigurationError,
 )
 from .request_builder import RequestBuilder
 from .response_parser import ResponseParser, ResponseValidator
@@ -41,7 +42,10 @@ class AIManager:
     @asynccontextmanager
     async def transport(self, client=None, semaphore=None, issues=None):
         owns_client = client is None
-        provider = self.client_factory() if owns_client else client
+        try:
+            provider = self.client_factory() if owns_client else client
+        except ValueError as error:
+            raise AIConfigurationError(str(error)) from error
         try:
             yield QwenClient(provider, semaphore)
         finally:
@@ -135,6 +139,9 @@ class AIManager:
         try:
             async with self.transport(client, issues=errors) as transport:
                 return await generator.generate(transport, project, preferences), errors
+        except AIConfigurationError as error:
+            errors.append(format_ai_error("configuration", error))
+            return None, errors
         except Exception as error:
             # Advice failure must leave the factual timetable usable.
             LOGGER.exception("Recommendation generation failed")

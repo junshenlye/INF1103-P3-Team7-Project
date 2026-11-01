@@ -139,3 +139,16 @@ def test_client_close_failure_preserves_successful_extraction(tmp_path):
     )
     assert result["module_count"] == 1 and provider.closed
     assert errors == ["AI Manager error: client cleanup: close failed"]
+
+
+def test_advice_configuration_failure_preserves_legacy_error_contract():
+    def unavailable():
+        raise ValueError("DASHSCOPE_API_KEY and DASHSCOPE_BASE_URL must be configured.")
+
+    result, errors = asyncio.run(
+        AIManager(unavailable).process_recommendation({}, "work_checklist", {}, [])
+    )
+    assert result is None
+    assert errors == [
+        "AI Manager error: configuration: DASHSCOPE_API_KEY and DASHSCOPE_BASE_URL must be configured."
+    ]

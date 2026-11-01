@@ -17,6 +17,10 @@ class AITransportError(RuntimeError):
     pass
 
 
+class AIConfigurationError(ValueError):
+    pass
+
+
 def create_client():
     """Create the shared asynchronous Qwen client.
 
