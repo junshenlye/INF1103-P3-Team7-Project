@@ -1,62 +1,24 @@
 # Grader test guide
 
-## Requirements
+Install Python 3.12, Node.js 22+ and Docker Desktop with Linux containers, then:
 
-- Docker Desktop running with Linux containers
-- Python 3.12
-- Node.js and npm
-
-Install the Python test packages once:
-
-```text
+```sh
 python -m pip install -r requirements-dev.txt
+sh tests/run.sh full
 ```
 
-## Run all automated tests
+Windows PowerShell: `.\tests\run.ps1 -Group full`. For frequent offline feedback,
+select `fast`. A successful full run ends with `FULL PASS`; required integration
+checks cannot skip. Logs, JUnit, coverage and summaries are in `test-results/`.
+See [tests/README.md](tests/README.md) for isolation and troubleshooting.
 
-Windows PowerShell:
+Automated tests need no DashScope key and consume no AI credits. They exercise
+both Python and JavaScript in Docker, real disposable PostgreSQL, and the built
+frontend/API containers. They do not verify live Qwen quality.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run.ps1
-```
-
-macOS or Linux:
-
-```sh
-sh ./tests/run.sh
-```
-
-The runner explains each test group, lists each test result, and ends with a
-`✅` summary. A successful run displays `AUTOMATED TEST RESULT - PASS`. The
-complete output is saved in `test-results/`.
-
-The automated tests do not require a DashScope API key or consume AI credits.
-
-## Run the actual application through the UI
-
-For the live UI run, add a valid `DASHSCOPE_API_KEY` to `.env`. Do not include
-the key in the submitted project.
-
-Windows PowerShell:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_local_windows.ps1
-```
-
-macOS or Linux:
-
-```sh
-./scripts/run_local_unix.sh
-```
-
-Open <http://127.0.0.1:5173>, create a trimester, and open the clearly labelled
-`grader-test-case/images/` folder at the project root. Upload the matching image
-for each module:
-
-- `HSC1007`
-- `HSC1009`
-- `HSC1010`
-- `OTY1103`
-
-Confirm that the assessment schedule and study plan appear, then reload the
-page and reopen the saved trimester.
+For an optional live UI assessment, configure `.env` as documented in the README,
+start `scripts/run_local_unix.sh` (Windows: `scripts/run_local_windows.ps1`) and
+open <http://127.0.0.1:5173>. Create a trimester and upload the matching HSC1007,
+HSC1009, HSC1010 and OTY1103 images from `grader-test-case/images/`. Confirm the
+schedule and advice appear, then reopen the saved trimester. This consumes
+Qwen credits; keep credentials out of the submitted project.
