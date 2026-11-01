@@ -3,9 +3,8 @@
 The relevance prompt is a cheap gate. The interpretation prompt allows open
 reasoning, and the normalization prompt converts that memo into predictable
 assessment prototypes. Keeping prompts here prevents model instructions from
-obscuring the procedural code in ``ai_manager.py``.
+obscuring request construction in ``ai_manager/request_builder.py``.
 """
-
 
 RELEVANCE_PROMPT = """RELEVANCE GATE
 Decide whether this image contains module assessment information such as
