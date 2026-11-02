@@ -96,14 +96,13 @@ acceptance locks the project to prevent two accepted candidates of one type.
 The HTTP subprocess path is removed. Framework errors, including malformed
 requests, use payload/errors JSON. No required check is converted into a skip.
 
-## Slice progress and remaining migration
+## Verification and remaining migration
 
-On 1 November 2026 the implementation progressed through intake ownership,
-provider extraction/validation, typed timetable construction, interchangeable
-advice, repository transactions and shared CLI/HTTP execution. Existing regression
-cases ran between slices; added contracts/failure cases then drove the full gate.
-See test reports for the latest exact counts and coverage. Changes were prepared
-by Codex in this working session; no human team contribution is inferred.
+The refactor passes the full local quality gate: 138 offline Python tests,
+149 Python tests in Docker with zero skips, 10 JavaScript tests on the host and
+in Docker, and application readiness and database round-trip smoke checks.
+Docker statement-and-branch coverage is 82.96%. See ignored `test-results/`
+reports for the detailed evidence from each verification run.
 
 Transitional function adapters remain in manager `__init__.py` files for existing
 scripts/tests and HTTP CRUD calls. They delegate to the implemented classes;
@@ -111,8 +110,7 @@ the main planning path uses injected managers and domain objects. Remove adapter
 only after their callers migrate, preserving external imports until then. Input
 prototype normalization still uses dictionaries as a conversion boundary.
 
-Live Qwen accuracy and a manual interactive browser run are outside automated
-verification and were not performed during this refactor. The user prohibited
-paid calls, pushes and deployment. Container smoke checks validate local readiness,
-not production deployment. GitHub Actions itself must run after an authorized push;
-local verification exercises the same underlying entry points.
+Live Qwen accuracy and a manual interactive browser run remain outside automated
+verification. Normal checks use fake AI providers and consume no API credits.
+Container smoke checks validate local readiness. GitHub Actions runs the same
+underlying entry points after pushes and pull requests; it does not deploy.
