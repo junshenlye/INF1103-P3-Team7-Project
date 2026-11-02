@@ -293,7 +293,6 @@ class Gate:
                     *compose,
                     "up",
                     "--build",
-                    "--quiet-build",
                     "-d",
                     "--wait",
                     "--wait-timeout",
