@@ -6,15 +6,15 @@ import json
 import logging
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import uuid
 
 from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import HTTPException
 
-from src import ai_manager, data_manager, logic_manager
+from src import ai_manager, data_manager
+from src.application.planning_service import create_service
 
 
 LOGGER = logging.getLogger(__name__)
@@ -36,6 +36,15 @@ def json_ready(value):
 def error_response(message, status_code):
     """Return the API's consistent error document."""
     return jsonify({"payload": None, "errors": [message]}), status_code
+
+
+@APP.errorhandler(Exception)
+def application_error(error):
+    """Keep framework and unexpected failures within the public JSON contract."""
+    if isinstance(error, HTTPException):
+        return error_response(error.description, error.code)
+    LOGGER.exception("Unexpected HTTP application failure")
+    return error_response("Unexpected application failure.", 500)
 
 
 @APP.after_request
@@ -65,8 +74,12 @@ def projects():
     """List projects or create a new trimester project."""
     try:
         if request.method == "GET":
-            return jsonify({"payload": json_ready(data_manager.list_projects()), "errors": []})
+            return jsonify(
+                {"payload": json_ready(data_manager.list_projects()), "errors": []}
+            )
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return error_response("Request body must be an object.", 400)
         project = data_manager.create_project(
             body.get("name"),
             body.get("week_count", 14),
@@ -90,7 +103,7 @@ def project_detail(project_id):
 
 @APP.post("/api/projects/<int:project_id>/process")
 def process_project(project_id):
-    """Stage uploaded module images and invoke the core CLI unchanged."""
+    """Stage uploaded images and invoke the shared planning service."""
     try:
         if data_manager.get_project(project_id) is None:
             return error_response("Project not found.", 404)
@@ -113,6 +126,10 @@ def process_project(project_id):
             if not isinstance(file_fields, list) or not file_fields:
                 file_field = module.get("file_field")
                 file_fields = [file_field] if isinstance(file_field, str) else []
+            if any(not isinstance(field, str) for field in file_fields):
+                return error_response(
+                    f"Module {position} has invalid file fields.", 400
+                )
             uploads = [request.files.get(field) for field in file_fields]
             if not uploads or any(
                 upload is None or not upload.filename for upload in uploads
@@ -137,28 +154,19 @@ def process_project(project_id):
                 }
             )
 
-        manifest_path = directory / "payload.json"
-        manifest_path.write_text(
-            json.dumps({"module_count": len(modules), "modules": modules}),
-            encoding="utf-8",
-        )
-        environment = dict(os.environ)
-        environment["STACKPLAN_PROJECT_ID"] = str(project_id)
-        completed = subprocess.run(
-            [sys.executable, "-m", "src.main", str(manifest_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=environment,
-            timeout=int(os.getenv("PIPELINE_TIMEOUT_SECONDS", "1800")),
-        )
-    try:
-        result = json.loads(completed.stdout)
-    except json.JSONDecodeError:
-        LOGGER.error("Pipeline returned unreadable output: %s", completed.stderr)
-        return error_response("Pipeline returned unreadable output.", 500)
-    status_code = 200 if result.get("payload") is not None else 422
-    return jsonify(result), status_code
+        try:
+            service = APP.config.get("PLANNING_SERVICE_FACTORY", create_service)()
+            result = asyncio.run(
+                service.run(
+                    {"module_count": len(modules), "modules": modules},
+                    directory,
+                    project_id=project_id,
+                    timeout=float(os.getenv("PIPELINE_TIMEOUT_SECONDS", "1800")),
+                )
+            )
+        except ValueError as error:
+            return error_response(f"Pipeline configuration error: {error}", 500)
+    return jsonify(result.to_record()), 200 if result.payload is not None else 422
 
 
 @APP.route("/api/projects/<int:project_id>/recommendations", methods=["GET", "POST"])
@@ -170,18 +178,16 @@ def recommendations(project_id):
             return jsonify({"payload": json_ready(stored), "errors": []})
 
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return error_response("Request body must be an object.", 400)
         recommendation_type = body.get("recommendation_type")
         preferences = body.get("preferences", {})
         latest_result = data_manager.get_latest_pipeline_result(project_id)
         modules = (
-            latest_result.get("modules", [])
-            if isinstance(latest_result, dict)
-            else []
+            latest_result.get("modules", []) if isinstance(latest_result, dict) else []
         )
         schedule = (
-            latest_result.get("schedule")
-            if isinstance(latest_result, dict)
-            else None
+            latest_result.get("schedule") if isinstance(latest_result, dict) else None
         )
         if not modules or not isinstance(schedule, dict):
             return error_response("Project has no saved pipeline result.", 404)
@@ -191,26 +197,11 @@ def recommendations(project_id):
             "schedule": schedule,
         }
         errors = []
-        normalized_preferences = logic_manager.normalize_study_preferences(
-            preferences
+        service = APP.config.get("PLANNING_SERVICE_FACTORY", create_service)()
+        plan, normalized_preferences = asyncio.run(
+            service.advice(project_payload, recommendation_type, preferences, errors)
         )
-        raw_recommendation, errors = asyncio.run(
-            ai_manager.process_recommendation(
-                project_payload,
-                recommendation_type,
-                normalized_preferences,
-                errors,
-            )
-        )
-        recommendation = None
-        if raw_recommendation is not None:
-            recommendation, errors = logic_manager.process_recommendation(
-                raw_recommendation,
-                recommendation_type,
-                project_payload,
-                normalized_preferences,
-                errors,
-            )
+        recommendation = plan.to_record() if plan is not None else None
         if recommendation is None:
             return jsonify({"payload": None, "errors": errors}), 422
         stored = data_manager.save_recommendation(
@@ -235,6 +226,8 @@ def recommendations(project_id):
 def recommendation_status(project_id, recommendation_id):
     """Accept or dismiss a generated recommendation."""
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return error_response("Request body must be an object.", 400)
     try:
         stored = data_manager.set_recommendation_status(
             project_id,

@@ -45,65 +45,33 @@ dates and weights are never presented as confirmed facts.
 
 ## How it works
 
-<p align="center">
-  <img src="docs/images/system-architecture.png" alt="Stackplan system architecture showing the frontend, API helper, manager pipeline, Qwen provider and PostgreSQL database" width="100%">
-</p>
+Both HTTP uploads and the CLI call `src/application/planning_service.py`.
+Each run owns its `ProcessingContext` and temporary evidence. The service
+coordinates four managers and returns the existing `payload` / `errors` JSON
+contract, including usable partial results.
 
-<p align="center"><em>Stackplan keeps AI interpretation, scheduling rules, persistence and presentation in separate components.</em></p>
+| Boundary | Main collaborators |
+| --- | --- |
+| IO Manager | `SubmissionValidator`, run-owned `EvidenceStore`, `ResultPresenter` |
+| AI Manager | `QwenClient`, `RequestBuilder`, response parser/validator, interchangeable advice generators |
+| Logic Manager | `ModuleNormalizer`, `ScheduleBuilder`, `ImportanceRanker`, `RecommendationValidator` |
+| Data Manager | `PlanningRepository`, `PostgresRepository`, `ResultSerializer` |
 
-```text
-Browser
-  -> Flask frontend
-  -> Helper API
-  -> main.py orchestration
-     -> IO Manager
-     -> AI Manager: Qwen extraction
-     -> Logic Manager: normalize and schedule
-     -> AI Manager: Qwen study advice
-     -> Logic Manager: validate advice
-     -> Data Manager -> PostgreSQL
-```
+Domain objects own assessment identity, timing, weight scope, immutable module
+collections, schedule appearances and validated study tasks. Explicit weeks,
+unknown dates, Week 7 recess and global importance ranking retain their existing
+meaning. SQL remains behind the repository; the existing PostgreSQL JSONB schema
+and saved payloads remain readable without migrations.
 
-The managers in `src/` have one responsibility each:
-
-- **IO Manager** validates module metadata and safely stages images.
-- **AI Manager** owns Qwen prompts, HTTP requests and JSON response parsing.
-- **Logic Manager** normalizes AI output, expands repeated assessments, builds
-  the weekly ranking, and validates study advice against the schedule.
-- **Data Manager** stores projects, complete pipeline results and recommendations.
-
-`main.py` deliberately owns the sequence between these managers. PostgreSQL
-stores its files in the project at `database/data/`. Compose mounts that folder
-into the database container, so saved projects survive container replacement
-and the persistence boundary is visible during assessment. The runtime files
-are excluded from Git because PostgreSQL manages their binary format.
-
-Hard failures are appended to the shared `errors` list. Unclear assessment
-details remain attached to the affected module or schedule item as comment
-metadata, so one vague screenshot does not discard the rest of the result.
-
-## Assignment alignment
-
-- The assessed Python pipeline is fully procedural; there are no class
-  definitions.
-- Every accepted module image passes through Qwen relevance, interpretation
-  and normalization calls. Removing AI extraction removes the application's
-  central ability to understand assessment screenshots.
-- AI Manager parses JSON and checks the response container. Logic Manager then
-  validates domain fields before scheduling or displaying them.
-- Logic Manager contains the business rules. Its importance ranking combines
-  an explicit module-level assessment weight with module credits, ranks all
-  comparable assessments, and keeps group-only or unknown weights unranked.
-- The permitted PostgreSQL persistence option stores complete JSON documents
-  as JSONB while keeping database access behind Data Manager functions.
-- Docker Compose provides the same services locally and in the test workflow.
-- GitHub Actions builds and smoke-tests the complete Docker deployment on
-  pushes and pull requests.
+See [refactor contracts and OOP evidence](docs/REFACTOR.md) for the implemented
+UML, exception policy, verification evidence and remaining adapter migration.
 
 ## Repository structure
 
 ```text
-src/                 assessed manager pipeline
+src/domain/          assessment, timing, module, schedule and study-plan objects
+src/application/     shared workflow and per-run results
+src/*_manager/       four manager packages and focused collaborators
 helpers/             HTTP API and Docker payload adapter
 frontend/            independent Flask presentation layer
 database/            PostgreSQL schema and ignored persistent runtime data
@@ -114,16 +82,17 @@ grader-test-case/    easy-to-find live JSON inputs and assessment images
 scripts/run_local_unix.sh macOS and Linux local launcher
 scripts/run_local_windows.ps1 Windows local launcher
 compose.windows.yaml Windows-safe PostgreSQL storage override
-compose.yaml         application and isolated test services
+tests/deployment/compose.yaml isolated verification stack
+compose.yaml         development application services
 ```
 
 ## Requirements
 
 - Docker with Docker Compose 2.24 or newer
 - PowerShell 5.1 or newer on Windows, with Docker Desktop using Linux containers
-- A DashScope API key
+- A DashScope API key for live extraction only; automated verification needs none
 - Python 3.12 for development outside Docker
-- Node.js only for the optional frontend JavaScript checks
+- Node.js 22 or newer for local JavaScript checks
 
 ## Configure the environment
 
@@ -226,7 +195,7 @@ and has no default input. It runs only when explicitly given a payload.
 The small live example processes one module and consumes Qwen tokens:
 
 ```sh
-sh ./tests/run.sh live
+docker compose run --rm stackplan-cli /input/grader-test-case/one-module.json
 ```
 
 The supplied four-module example can be run with:
@@ -267,25 +236,24 @@ recommended way to demonstrate the complete system.
 
 ## Run the tests
 
-All test code and fixtures are contained in `tests/`. Normal tests use fake AI
-responses and do not consume Qwen tokens. See the
-[`GRADER_TEST_GUIDE.md`](GRADER_TEST_GUIDE.md) for the complete Windows,
-macOS, Linux, and manual UI instructions.
-
-Run every automated test on macOS or Linux:
+Install `requirements-dev.txt` in your development environment, then use the
+same gate as GitHub Actions:
 
 ```sh
-sh ./tests/run.sh
+sh tests/run.sh fast   # static checks, offline Python and JavaScript tests
+sh tests/run.sh full   # also all tests in Docker, real PostgreSQL and app smoke
 ```
 
-Run every automated test on Windows PowerShell:
+Windows: `.\tests\run.ps1 -Group fast` or `-Group full`. The equivalent portable
+entry point is `python tests/verify.py fast|full`. No argument defaults to full.
+The gate never reads `.env`, calls Qwen or mounts development data. It returns a
+nonzero status on required failures, cleans disposable containers and writes
+JUnit, coverage, logs and a JSON summary to ignored `test-results/`.
 
-```powershell
-.\tests\run.ps1
-```
-
-The runner prints a final verification summary and saves the full output in
-`test-results/`.
+GitHub Actions runs the same checks in order: offline → PostgreSQL/container
+tests → application smoke. A fast pass is not a full pass. See
+[tests/README.md](tests/README.md) for isolation, coverage floors and troubleshooting,
+or [GRADER_TEST_GUIDE.md](GRADER_TEST_GUIDE.md) for assessment commands.
 
 ## Inspect or export saved data
 
