@@ -1,7 +1,7 @@
 name: Quality gate
 on:
   push:
-    branches: [main, redesign-scope, 'codex/**']
+    branches: [main, redesign-scope, oop-refactor, 'schedule-revision-*']
   pull_request:
 permissions:
   contents: read
