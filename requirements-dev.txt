@@ -1,9 +1,2 @@
 -r requirements.txt
-pytest==8.4.2
-pytest-cov==6.2.1
-coverage==7.10.7
-ruff==0.14.3
-iniconfig==2.1.0
-pluggy==1.6.0
-Pygments==2.21.0
-tomli==2.4.1
+pytest>=8,<9

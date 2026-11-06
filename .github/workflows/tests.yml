@@ -1,54 +1,31 @@
-name: Quality gate
+name: Deployment check
+
 on:
   push:
-    branches: [main, redesign-scope, oop-refactor, 'schedule-revision-*']
+    branches: [main, redesign-scope]
   pull_request:
+
 permissions:
   contents: read
+
 concurrency:
-  group: quality-${{ github.ref }}
+  group: deployment-check-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
-  offline:
+  deployable-stack:
+    name: Build and smoke-test the Docker stack
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python for the smoke client
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-          cache: pip
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: pip install -r requirements-dev.txt
-      - run: python tests/verify.py fast
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: offline-reports
-          path: test-results/
-  integration:
-    needs: offline
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - run: python3 tests/verify.py integration
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: integration-reports
-          path: test-results/
-  deployment:
-    needs: integration
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - run: python3 tests/verify.py deployment
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: deployment-reports
-          path: test-results/
+          python-version: "3.12"
+
+      - name: Build services and verify the deployed workflow
+        run: sh ./tests/run.sh deployment

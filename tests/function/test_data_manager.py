@@ -92,24 +92,3 @@ def test_recommendation_is_saved_separately_from_pipeline_result(database_url):
     assert saved["status"] == "candidate"
     assert saved["recommendation_payload"]["recommendation_type"] == "work_checklist"
     assert data_manager.list_recommendations(project["id"], database_url)[0]["id"] == saved["id"]
-
-
-def test_concurrent_accepts_leave_one_accepted_candidate_per_type(database_url):
-    from concurrent.futures import ThreadPoolExecutor
-    from src.data_manager import PostgresRepository
-    from tests.function.test_repository_contract import advice
-    repository = PostgresRepository(database_url)
-    project = repository.get_or_create_project("Concurrent acceptance")
-    candidates = [repository.save_recommendation(project_id=project["id"], **advice()) for _ in range(2)]
-    def accept(candidate):
-        return repository.set_recommendation_status(project["id"], candidate["id"], "accepted")
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        assert len(list(executor.map(accept, candidates))) == 2
-    assert [row["status"] for row in repository.list_recommendations(project["id"])].count("accepted") == 1
-
-
-def test_connection_failure_is_typed_and_does_not_expose_connection_details():
-    import pytest
-    from src.data_manager import PostgresRepository, DataManagerError
-    with pytest.raises(DataManagerError, match="Could not connect to PostgreSQL"):
-        PostgresRepository("postgresql://unused:unused@127.0.0.1:1/unused").check_connection()

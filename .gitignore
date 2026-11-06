@@ -10,5 +10,3 @@ htmlcov/
 stackplan-result.json
 test-results/
 database/data/
-
-.ruff_cache/

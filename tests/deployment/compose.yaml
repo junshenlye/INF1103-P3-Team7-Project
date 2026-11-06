@@ -1,66 +1,14 @@
-# Standalone verification stack: no .env, development bind mounts or credentials.
 services:
-  node-tests:
-    build:
-      context: ../..
-      target: presentation-test
-  test-database:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: stackplan_test
-      POSTGRES_USER: stackplan_test
-      POSTGRES_PASSWORD: stackplan_test
-    tmpfs:
-      - /var/lib/postgresql/data
+  database:
     volumes:
-      - ../../database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U stackplan_test -d stackplan_test"]
-      interval: 2s
-      timeout: 2s
-      retries: 20
-  tests:
-    build:
-      context: ../..
-      target: test
-    environment:
-      DATABASE_URL: postgresql://stackplan_test:stackplan_test@test-database:5432/stackplan_test
-      STACKPLAN_REQUIRE_DATABASE: "1"
-      STACKPLAN_TEST_DATABASE: "1"
-      STACKPLAN_DEPLOYMENT_API_URL: http://api:8000
-      STACKPLAN_DEPLOYMENT_FRONTEND_URL: http://frontend:5173
-    depends_on:
-      test-database:
-        condition: service_healthy
-    volumes:
-      - ${STACKPLAN_REPORTS:-../../test-results}:/app/test-results
+      - stackplan-deployment-data:/var/lib/postgresql/data
   api:
-    build:
-      context: ../..
-      target: runtime
-    entrypoint: ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "30", "helpers.api_helper:APP"]
     environment:
-      DATABASE_URL: postgresql://stackplan_test:stackplan_test@test-database:5432/stackplan_test
+      # Deployment checks exercise health and persistence without calling Qwen.
       DASHSCOPE_API_KEY: ""
-      DASHSCOPE_BASE_URL: ""
-    depends_on:
-      test-database:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health', timeout=3)"]
-      interval: 2s
-      timeout: 4s
-      retries: 20
-  frontend:
-    build:
-      context: ../../frontend
+  stackplan-cli:
     environment:
-      STACKPLAN_API_URL: http://api:8000
-    depends_on:
-      api:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:5173/health', timeout=3)"]
-      interval: 2s
-      timeout: 4s
-      retries: 20
+      DASHSCOPE_API_KEY: ""
+
+volumes:
+  stackplan-deployment-data:
